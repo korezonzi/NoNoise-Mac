@@ -1,0 +1,17 @@
+.DS_Store
+/.build
+/Packages
+/*.xcodeproj
+/*.xcworkspace
+xcuserdata/
+derivedData/
+.swiftpm/
+configuration/registries/
+
+# Build outputs / artifacts
+NoNoiseMac.app/
+NoNoiseMacCLI
+*.zip
+
+# Scratch / local tooling
+test_cm
