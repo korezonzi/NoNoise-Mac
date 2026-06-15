@@ -2,6 +2,14 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-15 — Input Volume & Smart Level shipped
+- Added app-level **Input Volume** (25%…100%, default 100%, `mv.inputVolume`) applied pre-ring-buffer
+  in `AudioModel.captureOutput`, plus optional **Smart Level** (`mv.smartLevel`) that gradually lowers
+  Input Volume or Output Gain when sample peaks repeatedly approach the ceiling.
+- Cheap scalar peak/clip telemetry on capture/render threads; ~25 Hz main timer publishes warnings
+  (`Input too loud`, `Output clipping`, source-mic clipping) and runs Smart Level via the pure
+  `SmartLevelController` helper. UI in Settings and popover status card.
+
 ### 2026-06-15 — Input Volume & Smart Level plan
 - Added `docs/plans/2026-06-15-input-volume-smart-level.md`, a focused plan for hot-mic protection:
   a macOS-worded **Input Volume** control applied pre-DSP, cheap input/output sample-peak detection,
