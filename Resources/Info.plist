@@ -20,5 +20,16 @@
 	<string>NoNoise Mac needs access to your microphone to process audio.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.ivalsaraj.NoNoiseMac</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>nonoisemac</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
