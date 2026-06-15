@@ -2,6 +2,12 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-15 — Live input-device refresh
+- Added a CoreAudio hardware-device listener in `AudioModel` so newly plugged microphones refresh
+  into the NoNoise Mac input picker without relaunching the app. Refreshes are debounced, preserve
+  the selected mic when it is still connected, and re-resolve the NoNoise Mic lifecycle when the
+  virtual driver appears or disappears.
+
 ### 2026-06-15 — Single brand logo in popover
 - Kept the NoNoise PNG as the popover header logo, and changed the Noise Cancellation status-card
   badge back to a semantic SF Symbol so the widget does not show duplicate brand marks.

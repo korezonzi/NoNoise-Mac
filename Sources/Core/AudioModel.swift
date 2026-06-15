@@ -16,6 +16,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     @Published public var inputDevices: [AVCaptureDevice] = [] // Changed to AVCaptureDevice
     @Published public var selectedInputDeviceID: String = "" { // IDs are Strings in AVCapture
         didSet {
+             guard selectedInputDeviceID != oldValue else { return }
              setupCaptureSession()
         }
     }
@@ -28,6 +29,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     @Published public var outputDevices: [DeviceStruct] = []
     @Published public var selectedOutputDeviceID: AudioObjectID = 0 {
         didSet {
+             guard selectedOutputDeviceID != oldValue else { return }
              setupPlaybackEngine()
         }
     }
@@ -49,6 +51,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
+    private var hardwareDevicesListener: AudioObjectPropertyListenerBlock?
+    private var hardwareDevicesAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    private var deviceRefreshWorkItem: DispatchWorkItem?
     private var onDemandMode: Bool { micDeviceID != 0 }
     private var shouldCapture: Bool { !onDemandMode || virtualMicInUse }
     
@@ -193,7 +201,24 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         setupCaptureSession()
         setupPlaybackEngine()
         resolveVirtualMicLifecycle()   // arm the in-use listener + sync initial state
+        installHardwareDeviceListener()
         loadSettings()
+    }
+
+    deinit {
+        deviceRefreshWorkItem?.cancel()
+        if let block = hardwareDevicesListener {
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                   &hardwareDevicesAddr,
+                                                   DispatchQueue.main,
+                                                   block)
+        }
+        if let block = isRunningSomewhereListener, micDeviceID != 0 {
+            AudioObjectRemovePropertyListenerBlock(micDeviceID,
+                                                   &isRunningSomewhereAddr,
+                                                   DispatchQueue.main,
+                                                   block)
+        }
     }
 
     // MARK: - Presets & suppression knobs
@@ -444,10 +469,16 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         
         DispatchQueue.main.async {
             self.inputDevices = devs
-            if let defaultDev = AVCaptureDevice.default(for: .audio) {
-                 self.selectedInputDeviceID = defaultDev.uniqueID
+            if devs.contains(where: { $0.uniqueID == self.selectedInputDeviceID }) {
+                return
+            }
+            if let defaultDev = AVCaptureDevice.default(for: .audio),
+               devs.contains(where: { $0.uniqueID == defaultDev.uniqueID }) {
+                self.selectedInputDeviceID = defaultDev.uniqueID
             } else if let first = devs.first {
                 self.selectedInputDeviceID = first.uniqueID
+            } else {
+                self.selectedInputDeviceID = ""
             }
         }
     }
@@ -495,12 +526,17 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     /// Resolve the visible "NoNoise Mic" device and, if present, watch when an app starts/stops
     /// using it so we can hold the real mic only then. Safe to call again (re-resolves + re-arms).
     private func resolveVirtualMicLifecycle() {
+        let wasOnDemandMode = onDemandMode
         if let blk = isRunningSomewhereListener, micDeviceID != 0 {
             AudioObjectRemovePropertyListenerBlock(micDeviceID, &isRunningSomewhereAddr, DispatchQueue.main, blk)
             isRunningSomewhereListener = nil
         }
         micDeviceID = deviceID(forUID: VirtualMicRouting.visibleDeviceUID)
-        guard onDemandMode else { return }   // no driver → stay always-on, no listener
+        guard onDemandMode else {
+            virtualMicInUse = false
+            if wasOnDemandMode { startCapture() }
+            return
+        }   // no driver → stay always-on, no listener
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.refreshVirtualMicUsage()
         }
@@ -517,9 +553,34 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         var addr = isRunningSomewhereAddr
         AudioObjectGetPropertyData(micDeviceID, &addr, 0, nil, &size, &val)
         let inUse = val != 0
-        guard inUse != virtualMicInUse else { return }
         virtualMicInUse = inUse
         if inUse { startCapture() } else { stopCapture() }
+    }
+
+    private func installHardwareDeviceListener() {
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleDeviceRefresh()
+        }
+        hardwareDevicesListener = block
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                            &hardwareDevicesAddr,
+                                            DispatchQueue.main,
+                                            block)
+    }
+
+    private func scheduleDeviceRefresh() {
+        deviceRefreshWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.refreshDevicesAfterHardwareChange()
+        }
+        deviceRefreshWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
+    }
+
+    private func refreshDevicesAfterHardwareChange() {
+        fetchInputDevices()
+        fetchOutputDevices()
+        resolveVirtualMicLifecycle()
     }
 
     private func startCapture() {

@@ -5,6 +5,21 @@ for the must-read failure modes.
 
 ---
 
+### [PATTERN] 2026-06-15 — Device lists refresh from HAL notifications, not polling or relaunch
+- **Symptom:** macOS showed a newly plugged microphone immediately, but NoNoise Mac's input picker
+  stayed stale until the app was relaunched.
+- **Root cause:** `AudioModel.fetchInputDevices` and `fetchOutputDevices` ran on launch only. There
+  was no listener for `kAudioHardwarePropertyDevices`, so the SwiftUI picker never received a new
+  published device list after hot-plug events.
+- **Fix/Rule:** observe `kAudioHardwarePropertyDevices` on the system object with
+  `AudioObjectAddPropertyListenerBlock`, debounce the refresh on the main queue, and refresh both
+  AVCapture inputs and CoreAudio outputs. Preserve the selected input if it is still connected; only
+  fall back to the system default or first device when the selected mic disappears. Re-resolve the
+  NoNoise Mic lifecycle on the same refresh so installing/removing the virtual driver while the app
+  is open updates routing and on-demand capture.
+- **Files:** `Sources/Core/AudioModel.swift` (`installHardwareDeviceListener`,
+  `refreshDevicesAfterHardwareChange`, `fetchInputDevices`).
+
 ### [GOTCHA] 2026-06-15 — Swift 5.10 CI cannot type-check `MLShapedArray<Float16>` on macOS
 - **Symptom:** GitHub Actions failed in `swift build` on macos-14 / Swift 5.10 with
   `conformance of 'Float16' to 'MLShapedArrayScalar' is unavailable in macOS`, while local Swift 6.3
