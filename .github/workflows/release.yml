@@ -231,6 +231,7 @@ jobs:
             gh release create appcast "$APPCAST" \
               --title "Sparkle update feed" \
               --notes "Auto-update appcast for NoNoise Mac. Managed by CI — do not delete." \
-              --target "$TARGET_SHA"
+              --target "$TARGET_SHA" \
+              --latest=false
           fi
           echo "Published appcast for $ZSHORT (build $ZBUILD)."
