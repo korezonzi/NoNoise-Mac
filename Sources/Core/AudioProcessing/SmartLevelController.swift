@@ -10,7 +10,7 @@ public enum SmartLevelController {
     /// Protective auto-trim may reach the same floor as the manual control (no auto-boost).
     public static let minAutoInputVolume: Float = minInputVolume
     public static let minOutputGain: Float = 0.25
-    public static let defaultInputVolume: Float = 1.0
+    public static let defaultInputVolume: Float = 0.8
     /// Consecutive hot meter ticks before Smart Level acts (~120 ms at 25 Hz).
     public static let hotTickThreshold: Int = 3
 

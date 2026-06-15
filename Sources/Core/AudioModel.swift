@@ -161,9 +161,9 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     }
 
     /// App-level pre-DSP input trim (25%…100%). Does not write macOS hardware volume.
-    private var realtimeInputVolume: Float = 1.0
+    private var realtimeInputVolume: Float = SmartLevelController.defaultInputVolume
 
-    @Published public var inputVolumeValue: Float = 1.0 {
+    @Published public var inputVolumeValue: Float = SmartLevelController.defaultInputVolume {
         didSet {
             realtimeInputVolume = SmartLevelController.runtimeInputVolume(for: inputVolumeValue)
             guard !isApplyingPreset else { return }
@@ -559,7 +559,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         voicePolishEnabled = true
         clarityLevel = .off
         mouthNoiseLevel = .off
-        inputVolumeValue = 1.0
+        inputVolumeValue = SmartLevelController.defaultInputVolume
         smartLevelEnabled = false
         incomingCleanupEnabled = false
         incomingSourceUID = ""
@@ -593,6 +593,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         guard let raw = d.string(forKey: PrefKey.preset),
               let preset = VoicePreset(rawValue: raw) else {
             // First launch: keep defaults (Meeting) and push them to the DSP.
+            inputVolumeValue = SmartLevelController.defaultInputVolume
             applyPreset(.meeting)
             applyVoiceChain()
             return
@@ -609,7 +610,8 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         clarityLevel = ClarityLevel(rawValue: d.string(forKey: PrefKey.clarity) ?? "") ?? .off
         mouthNoiseLevel = MouthNoiseLevel(rawValue: d.string(forKey: PrefKey.mouthNoise) ?? "") ?? .off
         inputVolumeValue = d.object(forKey: PrefKey.inputVolume) != nil
-            ? SmartLevelController.clampInputVolume(d.float(forKey: PrefKey.inputVolume)) : 1.0
+            ? SmartLevelController.clampInputVolume(d.float(forKey: PrefKey.inputVolume))
+            : SmartLevelController.defaultInputVolume
         smartLevelEnabled = d.object(forKey: PrefKey.smartLevel) as? Bool ?? false
         loudnessNormEnabled = d.object(forKey: PrefKey.loudnessNorm) as? Bool ?? false
         loudnessTargetLUFS  = d.object(forKey: PrefKey.loudnessTarget) != nil

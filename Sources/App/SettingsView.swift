@@ -192,8 +192,8 @@ struct GeneralSettingsView: View {
 
             HStack {
                 Spacer()
-                Button("Reset to 100%") {
-                    withAnimation { audioModel.inputVolumeValue = 1.0 }
+                Button("Reset to 80%") {
+                    withAnimation { audioModel.inputVolumeValue = SmartLevelController.defaultInputVolume }
                 }
                 .controlSize(.small)
             }

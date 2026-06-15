@@ -3,9 +3,12 @@ import XCTest
 
 final class SmartLevelControllerTests: XCTestCase {
 
-    func testInputVolumeDefaultIsUnity() {
-        XCTAssertEqual(SmartLevelController.defaultInputVolume, 1.0)
-        XCTAssertEqual(SmartLevelController.runtimeInputVolume(for: 1.0), 1.0)
+    func testInputVolumeDefaultIsEightyPercent() {
+        XCTAssertEqual(SmartLevelController.defaultInputVolume, 0.8)
+        XCTAssertEqual(
+            SmartLevelController.runtimeInputVolume(for: SmartLevelController.defaultInputVolume),
+            0.8,
+            accuracy: 1e-6)
     }
 
     func testInputVolumeScalesSamples() {

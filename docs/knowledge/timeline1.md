@@ -2,6 +2,14 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-15 — Input Volume default lowered to 80%
+- Changed fresh installs and Settings reset to use `SmartLevelController.defaultInputVolume = 0.8`
+  instead of 1.0, so hot mics get a little headroom by default while existing saved `mv.inputVolume`
+  values remain untouched.
+- `Sources/Core/AudioProcessing/SmartLevelController.swift`, `Sources/Core/AudioModel.swift`,
+  `Sources/App/SettingsView.swift`, `Tests/NoNoiseMacTests/SmartLevelControllerTests.swift`,
+  `AGENTS.md`.
+
 ### 2026-06-15 — Offline audio file denoise CLI (Valsaraj)
 - Added `NoNoiseMacCLI --denoise <input> --output <out>` for on-device file cleanup: AVFoundation
   decode → mono 48 kHz → `DeepFilterNetDSP` (with readiness wait) → preset `VoiceChain` → atomic
@@ -48,7 +56,7 @@ Chronological log of notable changes. Newest on top.
 
 ### 2026-06-15 — Settings reset added
 - Added a destructive-confirmed **Reset Settings** card in Settings → General. It restores
-  audio/device settings to defaults (Meeting preset, full suppression, unity input/output gain,
+  audio/device settings to defaults (Meeting preset, full suppression, 80% input volume, unity output gain,
   Voice Polish on, Broadcast Voice/Mouth Noise/Smart Level/Loudness/Incoming cleanup off, LUFS
   target −14) while preserving saved Voice Profiles and custom Hotkeys.
 - Added `SettingsResetPolicy` as the single resettable-key list, with a headless XCTest proving
@@ -180,7 +188,7 @@ Chronological log of notable changes. Newest on top.
   Output route on the next row.
 
 ### 2026-06-15 — Input Volume & Smart Level shipped
-- Added app-level **Input Volume** (25%…100%, default 100%, `mv.inputVolume`) applied pre-ring-buffer
+- Added app-level **Input Volume** (25%…100%, originally default 100%, `mv.inputVolume`) applied pre-ring-buffer
   in `AudioModel.captureOutput`, plus optional **Smart Level** (`mv.smartLevel`) that gradually lowers
   Input Volume or Output Gain when sample peaks repeatedly approach the ceiling.
 - Cheap scalar peak/clip telemetry on capture/render threads; ~25 Hz main timer publishes warnings
