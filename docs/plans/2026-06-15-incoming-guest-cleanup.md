@@ -166,7 +166,7 @@ The incoming source must be a **loopback/aggregate input** carrying the call app
 - our own **NoNoise Mic** virtual device (would loop our cleaned voice back in);
 - a **hidden** device.
 
-The monitor output must be a **real, non-virtual** output (the whole point is to hear the guest on real speakers; routing the monitor into BlackHole again would create a loop). This is pure logic — exactly the kind `VirtualMicRouting` already hosts.
+The monitor output must be a **real physical output** (the whole point is to hear the guest on real speakers/headphones). It must actually HAVE output channels (`hasOutput`), and it must reject every re-feed path: virtual transports, known loopback sinks (BlackHole/Loopback), **and aggregate/multi-output devices** — a Multi-Output/Aggregate containing BlackHole + speakers would silently re-feed the captured loopback and create a feedback path, so it is never a valid monitor output even though it has output channels. This is pure logic — exactly the kind `VirtualMicRouting` already hosts.
 
 **Why `DeviceInfo` must grow:** the existing `DeviceInfo` (`uid`, `name`, `isHidden`, `hasOutput`) carries **no input-capability and no transport-type metadata**, so the *only* way today's draft predicate could reject a physical mic is by name — which fails for any mic not literally named "Microphone". The canonical predicate needs structured metadata: whether the device has **input** channels, and its **transport type** (a built-in/USB/Bluetooth/etc. mic is physical; an aggregate or virtual loopback reports `kAudioDeviceTransportTypeAggregate`/`...Virtual`, and BlackHole/Loopback are matched by their known names as a belt-and-suspenders fallback). We add `hasInput` and `transportType` to `DeviceInfo` (both default-initialized so existing call sites — `fetchOutputDevices` and the existing routing tests — keep compiling unchanged).
 
@@ -241,6 +241,14 @@ final class IncomingCleanupTests: XCTestCase {
             loopbackInput(VirtualMicRouting.engineDeviceUID, VirtualMicRouting.engineDeviceName)))
     }
 
+    /// SELF-LOOP FIX: the visible NoNoise Mic is rejected by UID even when its NAME differs
+    /// (localised / renamed). The shared contract's strongest id is the UID, so a UID match
+    /// with a differing name must STILL be rejected — proves `isNoNoiseVisible` matches by UID.
+    func testNoNoiseVisibleRejectedByUIDWhenNameDiffers() {
+        XCTAssertFalse(VirtualMicRouting.isSelectableIncomingSource(
+            loopbackInput(VirtualMicRouting.visibleDeviceUID, "Renamed Virtual Input")))
+    }
+
     /// A device with no input channels is never an incoming source (you can't capture it).
     func testOutputOnlyDeviceIsNotAnIncomingSource() {
         XCTAssertFalse(VirtualMicRouting.isSelectableIncomingSource(output("spk:0", "MacBook Pro Speakers")))
@@ -272,12 +280,45 @@ final class IncomingCleanupTests: XCTestCase {
         XCTAssertTrue(VirtualMicRouting.isSelectableMonitorOutput(output("spk:0", "MacBook Pro Speakers")))
     }
 
+    /// A physical USB / Bluetooth OUTPUT remains a valid monitor output (real output, not a re-feed).
+    func testPhysicalUSBAndBluetoothOutputsAreValidMonitorOutputs() {
+        XCTAssertTrue(VirtualMicRouting.isSelectableMonitorOutput(
+            output("usb:out", "USB Audio Device", transport: VirtualMicRouting.transportTypeUSB)))
+        XCTAssertTrue(VirtualMicRouting.isSelectableMonitorOutput(
+            output("bt:ap", "AirPods Pro", transport: VirtualMicRouting.transportTypeBluetooth)))
+    }
+
     /// Routing the monitor into a loopback sink (BlackHole) or our engine would re-loop — reject it.
     func testLoopbackAndEngineAreNotMonitorOutputs() {
         XCTAssertFalse(VirtualMicRouting.isSelectableMonitorOutput(
             output("BH:2ch", "BlackHole 2ch", transport: VirtualMicRouting.transportTypeVirtual)))
         XCTAssertFalse(VirtualMicRouting.isSelectableMonitorOutput(
             output(VirtualMicRouting.engineDeviceUID, VirtualMicRouting.engineDeviceName)))
+    }
+
+    /// REAL-OUTPUT-ONLY FIX (a): an input-only device (no output channels) is NOT a monitor output,
+    /// even if its transport is aggregate. The monitor must actually be able to play audio.
+    func testInputOnlyAggregateIsNotAMonitorOutput() {
+        XCTAssertFalse(VirtualMicRouting.isSelectableMonitorOutput(
+            loopbackInput("agg:in", "Input-Only Aggregate",
+                          transport: VirtualMicRouting.transportTypeAggregate)))
+    }
+
+    /// REAL-OUTPUT-ONLY FIX (b): a Multi-Output / Aggregate device (BlackHole + speakers) is NOT a
+    /// valid monitor output — even though it has output channels — because it would re-feed the
+    /// captured loopback and create a feedback path. Aggregate transport is rejected outright.
+    func testAggregateMultiOutputIsNotAMonitorOutput() {
+        XCTAssertFalse(VirtualMicRouting.isSelectableMonitorOutput(
+            output("multi:1", "Multi-Output Device",
+                   transport: VirtualMicRouting.transportTypeAggregate)))
+    }
+
+    /// REAL-OUTPUT-ONLY FIX (c): a physical built-in OUTPUT (speakers) with output channels remains
+    /// valid — guards against the new `hasOutput`/aggregate gates over-rejecting real outputs.
+    func testBuiltInOutputRemainsValidMonitorOutput() {
+        XCTAssertTrue(VirtualMicRouting.isSelectableMonitorOutput(
+            output("spk:builtin", "MacBook Pro Speakers",
+                   transport: VirtualMicRouting.transportTypeBuiltIn)))
     }
 }
 ```
@@ -341,13 +382,23 @@ Add after `filterInputs(_:)` (the existing last function), still inside the `enu
         0x66697265, // 'fire' FireWire
     ]
 
+    /// True for the VISIBLE NoNoise Mic device. Matches by UID OR name — the shared contract's
+    /// strongest id is the UID, so a UID match with a differing/localised name must STILL be
+    /// rejected (a self-loop: capturing our own cleaned voice back as the "incoming" guest).
+    /// Mirrors `isNoNoiseEngine`'s UID-or-name strategy for the hidden engine device.
+    public static func isNoNoiseVisible(_ d: DeviceInfo) -> Bool {
+        d.uid == visibleDeviceUID || d.name == visibleDeviceName
+    }
+
     /// True for a device the user may pick as the INCOMING (guest) source — a loopback/aggregate
     /// INPUT carrying the call app's output. The canonical contract is "loopback/aggregate only":
-    /// it must have input channels, must NOT be hidden, must NOT be our own NoNoise Mic devices,
-    /// and must NOT be a physical mic (built-in/USB/Bluetooth/…). Known loopbacks (BlackHole/
-    /// Loopback) are accepted by name even if their transport is reported as Unknown.
+    /// it must have input channels, must NOT be hidden, must NOT be our own NoNoise Mic devices
+    /// (matched by UID OR name via `isNoNoiseEngine`/`isNoNoiseVisible` so a UID match with a
+    /// differing name is still rejected), and must NOT be a physical mic (built-in/USB/Bluetooth/…).
+    /// Known loopbacks (BlackHole/Loopback) are accepted by name even if their transport is reported
+    /// as Unknown.
     public static func isSelectableIncomingSource(_ d: DeviceInfo) -> Bool {
-        guard d.hasInput, !d.isHidden, !isNoNoiseEngine(d), d.name != visibleDeviceName else { return false }
+        guard d.hasInput, !d.isHidden, !isNoNoiseEngine(d), !isNoNoiseVisible(d) else { return false }
         if physicalInputTransports.contains(d.transportType) { return false }
         // Accept: aggregate/virtual transports, or known loopback names (belt-and-suspenders for
         // drivers that report Unknown transport).
@@ -363,13 +414,20 @@ Add after `filterInputs(_:)` (the existing last function), still inside the `enu
         devices.filter(isSelectableIncomingSource)
     }
 
-    /// True for a device the user may pick to MONITOR (hear) the cleaned guest — a real output.
-    /// Excludes our engine and known loopback sinks (BlackHole/Loopback) and virtual transports:
-    /// routing the cleaned monitor back into a loopback would re-feed the incoming source (loop/echo).
+    /// True for a device the user may pick to MONITOR (hear) the cleaned guest — a REAL output.
+    /// The canonical contract is "real physical output only". It must HAVE output channels
+    /// (`hasOutput`), must NOT be hidden, must NOT be our engine, and must NOT be a re-feed path:
+    /// we REJECT virtual transports, aggregate transports, and known loopback sinks (BlackHole/
+    /// Loopback). Rejecting aggregate is load-bearing: a Multi-Output / Aggregate device containing
+    /// BlackHole + speakers would silently re-feed the incoming source (the captured loopback),
+    /// creating a feedback path — so an aggregate is never a valid monitor output even though it
+    /// has output channels.
     public static func isSelectableMonitorOutput(_ d: DeviceInfo) -> Bool {
-        !d.isHidden
+        d.hasOutput
+            && !d.isHidden
             && !isNoNoiseEngine(d)
             && d.transportType != transportTypeVirtual
+            && d.transportType != transportTypeAggregate
             && !knownLoopbackNames.contains(where: { d.name.contains($0) })
     }
 
@@ -383,7 +441,10 @@ The predicates reuse the existing `isNoNoiseEngine` / `visibleDeviceName` consta
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `swift test --filter IncomingCleanupTests`
-Expected: all 10 tests PASS (including `testPhysicalMicIsNotAnIncomingSource`).
+Expected: all 15 tests PASS (including `testPhysicalMicIsNotAnIncomingSource`, the self-loop
+`testNoNoiseVisibleRejectedByUIDWhenNameDiffers`, and the real-output-only monitor tests
+`testInputOnlyAggregateIsNotAMonitorOutput` / `testAggregateMultiOutputIsNotAMonitorOutput` /
+`testBuiltInOutputRemainsValidMonitorOutput`).
 
 - [ ] **Step 5: Commit**
 
@@ -1126,7 +1187,7 @@ The headless suite cannot exercise the live audio path. After Phase 1, verify in
 
 1. **Zero-cost-when-off (CRITICAL):** `./install-app.sh` (or `swift run`), open the popover. Confirm **Clean Incoming is OFF** by default. Verify the second engine object does NOT exist: no extra mic indicator, baseline CPU, and — to prove the model/buffers are NOT allocated at launch — confirm there is **no "DFN3 Model Loaded" print from the incoming engine** at startup (only the outgoing `AudioModel`'s DSP loads). The optional `incomingEngine` must still be `nil`.
 2. Install BlackHole (or Loopback) if not present. Set a system or app loopback so a known audio source (e.g. a YouTube tab, or a real call) plays into BlackHole. Set that app's **speaker/output** to BlackHole.
-3. Open Settings → **Clean Incoming/Guest**, enable it. Confirm the **incoming-source picker lists BlackHole but NOT any physical mic** (e.g. "MacBook Pro Microphone" must be absent — Task 1 contract). Pick **BlackHole** as "Incoming from" and your **real speakers/headphones** as "Hear on."
+3. Open Settings → **Clean Incoming/Guest**, enable it. Confirm the **incoming-source picker lists BlackHole but NOT any physical mic** (e.g. "MacBook Pro Microphone" must be absent — Task 1 contract). Also confirm the **"Hear on" picker lists your speakers/headphones but NEVER BlackHole/Loopback, an Aggregate, or a Multi-Output device** (the real-output-only monitor contract — picking a Multi-Output containing BlackHole would re-feed the captured loopback). Pick **BlackHole** as "Incoming from" and your **real speakers/headphones** as "Hear on."
 4. Confirm you HEAR the source through your speakers, **de-noised** (play a noisy clip — fan/keyboard/room reverb — and confirm it's cleaned).
 5. **Teardown + fresh state:** Toggle Clean Incoming **off** → confirm the cleaned playback stops immediately, the engine is released (`incomingEngine == nil`), no lingering audio, CPU returns to baseline. Toggle **on again** → confirm a NEW engine constructs (a new "DFN3 Model Loaded" print), audio resumes cleanly with NO carried-over artifact/ring from the previous session (proves fresh DFN recurrent hidden state per session).
 6. Quit + relaunch → confirm the enabled state, source, and monitor output are restored (persistence). Specifically verify the **monitor output** restores to the chosen real speakers/headphones (NOT a loopback) — proves the monitor UID was persisted from `monitorOutputUIDByID`, not the input-source map. If BlackHole's / the monitor's `AudioObjectID` changed across reboot, confirm both UIDs resolved correctly.
@@ -1161,7 +1222,7 @@ Add the shared-contract constants + classification for a SECOND device pair ("No
 
 - [ ] **Step 1: Write failing tests** asserting the new constants exist, are distinct from the mic constants, and that the new "NoNoise Guest" devices are excluded from incoming-source + monitor-output pickers (same self-loop reasoning as the NoNoise Mic devices).
 - [ ] **Step 2: Run → fail.**
-- [ ] **Step 3: Add the parallel constants** (e.g. `guestVisibleDeviceUID = "NoNoiseGuest:visible:48k2ch"`, `guestEngineDeviceUID = "NoNoiseGuest:engine:48k2ch"`, names, bundle id) and extend `isNoNoiseEngine`/`isSelectableIncomingSource`/`isSelectableMonitorOutput` to also reject the guest devices. **Do not hardcode the FourCharCode or repack the ASBD** — reuse the canonical layout rules from the existing driver.
+- [ ] **Step 3: Add the parallel constants** (e.g. `guestVisibleDeviceUID = "NoNoiseGuest:visible:48k2ch"`, `guestEngineDeviceUID = "NoNoiseGuest:engine:48k2ch"`, names, bundle id) and extend `isNoNoiseEngine`/`isSelectableIncomingSource`/`isSelectableMonitorOutput` to also reject the guest devices. **Match the guest devices by UID OR name** (the same `isNoNoiseVisible`/`isNoNoiseEngine` strategy Phase 1 uses — the UID is the strongest id, so a UID match with a differing/localised name must still be rejected to prevent a self-loop). **Do not hardcode the FourCharCode or repack the ASBD** — reuse the canonical layout rules from the existing driver.
 - [ ] **Step 4: Run → pass.**
 - [ ] **Step 5: Commit** `feat(routing): add NoNoise Guest second-sink contract (Phase 2)`.
 
@@ -1201,12 +1262,14 @@ Add the shared-contract constants + classification for a SECOND device pair ("No
   - *Second `AudioModel` vs. reusable engine* — explicit DECISION to extract a focused `IncomingCleanupEngine` (NOT a second `AudioModel`), with the shared-state risks enumerated (`fetchOutputDevices` auto-route hijack, duplicate HAL listeners, mic/virtual-mic coupling, `mv.*` key contention) and verified against the source.
   - *Zero-cost-when-off (CRITICAL fix)* — `DeepFilterNetDSP.init()` allocates ML buffers + async-loads the model, so the engine is **lazy-OWNED**: `AudioModel` holds `IncomingCleanupEngine?`, constructs it only on enable, releases to `nil` on disable. Verified against `DeepFilterNetDSP.swift:222` (async model load). Smoke test asserts no launch-time model load and fresh hidden state per session.
   - *Wrong "loopback only" contract (CRITICAL fix)* — `DeviceInfo` extended with `hasInput` + `transportType`; `isSelectableIncomingSource` rejects physical mics by transport type (built-in/USB/Bluetooth/…) with a failing-first test (`testPhysicalMicIsNotAnIncomingSource`).
+  - *Self-loop via UID-only NoNoise Mic match (CRITICAL fix)* — the visible NoNoise device was excluded by NAME only, but the contract's strongest id is `visibleDeviceUID`. Added `isNoNoiseVisible(_:)` (UID OR name) and use it in `isSelectableIncomingSource`, so a UID match with a differing/localised name is still rejected (`testNoNoiseVisibleRejectedByUIDWhenNameDiffers`). The Phase-2 (sketch) guest device follows the same UID-or-name pattern.
+  - *Monitor output must be a REAL output (CRITICAL fix)* — `isSelectableMonitorOutput` now REQUIRES `hasOutput` AND REJECTS aggregate transport (in addition to virtual/loopback/hidden/engine), so an input-only aggregate, a Multi-Output/Aggregate (BlackHole + speakers feedback path), and our engine are never offered as the monitor; physical built-in/USB/Bluetooth outputs remain valid. Tests: `testInputOnlyAggregateIsNotAMonitorOutput`, `testAggregateMultiOutputIsNotAMonitorOutput`, `testBuiltInOutputRemainsValidMonitorOutput`, `testPhysicalUSBAndBluetoothOutputsAreValidMonitorOutputs`.
   - *Unproven loopback capture (CRITICAL fix)* — Task S spike PROVES `AVCaptureDevice(uniqueID:)` resolves + delivers buffers for a BlackHole HAL UID before the engine is built on it, with an explicit HAL input-`AudioUnit` fallback documented if it fails.
   - *Monitor-output persistence contract drift (fix)* — a SEPARATE `monitorOutputUIDByID` (from the output scan) is used to persist/restore the monitor output; `persistIncomingSettings()` no longer reads the input-source map.
   - *Two concurrent CoreML streams cost* — addressed via off-by-default, lazy create / full teardown, and a MANDATORY profiling smoke step; the plan explicitly refuses to claim the second ANE stream is free.
   - *Routing via `VirtualMicRouting`* — Phase 1 adds pure device-classification predicates; Phase 2 (sketch) would add a parallel second-sink contract there.
 - **Invariants honored:** render thread allocation-free (engine reuses `DeepFilterNetDSP` unchanged — DFN only, no `VoiceChain`; lock-free `var Bool` scalar from main→render); engine source node attached once (`engine.reset()` does not detach); 100% on-device / no telemetry; HAL input-scope enumeration (not `AVCaptureDevice` discovery); pure logic in headless XCTest-able `VirtualMicRouting`, the live engine build+smoke-verified; legacy `mv.*` persistence namespace; no "MetalVoice"/"Ghostkwebb" in `Sources/`; no absolute local paths (repo-relative + "package root" only).
 - **Placeholder scan:** Phase 1 (Tasks S, 1–7) shows complete code + exact commands. Phase 2 is intentionally a DESIGN SKETCH (driver work) to be authored as its own concrete plan after Phase 1 ships — explicitly NOT executable from this document.
-- **Type consistency:** `VirtualMicRouting.DeviceInfo(hasInput:transportType:)`, `isSelectableIncomingSource`/`selectableIncomingSources`/`isSelectableMonitorOutput`, the transport-type constants, `IncomingCleanupEngine.start(sourceDeviceUID:monitorDeviceID:)`/`stop()`/`isCleaningEnabled`, `AudioModel.incomingCleanupEnabled`/`incomingSourceUID`/`incomingOutputDeviceID`/`incomingSourceDevices`/`monitorOutputDevices`/`incomingSourceUIDByID`/`monitorOutputUIDByID`/`deviceInfo(for:)`, and `PrefKey.incoming*` are used consistently across tasks.
+- **Type consistency:** `VirtualMicRouting.DeviceInfo(hasInput:transportType:)`, `isNoNoiseVisible`/`isSelectableIncomingSource`/`selectableIncomingSources`/`isSelectableMonitorOutput`, the transport-type constants, `IncomingCleanupEngine.start(sourceDeviceUID:monitorDeviceID:)`/`stop()`/`isCleaningEnabled`, `AudioModel.incomingCleanupEnabled`/`incomingSourceUID`/`incomingOutputDeviceID`/`incomingSourceDevices`/`monitorOutputDevices`/`incomingSourceUIDByID`/`monitorOutputUIDByID`/`deviceInfo(for:)`, and `PrefKey.incoming*` are used consistently across tasks.
 - **Open design questions flagged:** (1) the real cost of two concurrent ANE streams on the baseline Mac (measured in the smoke step, not assumed); (2) loopback setup friction (mitigated by UX + Setup Guide, but inherent to macOS); (3) whether `AVCaptureDevice(uniqueID:)` captures a non-discovered loopback (resolved by the Task-S spike, with a HAL fallback). Whether the incoming path should get its own preset (v1 uses full suppression) is deferred; Phase 2's driver topology is deferred to its own plan.
 ```
