@@ -613,18 +613,22 @@ Implementation sketch:
 ```swift
 let inputURL = URL(fileURLWithPath: options.inputPath)
 let outputURL = URL(fileURLWithPath: options.outputPath)
+let tempOutputURL = outputURL.deletingLastPathComponent()
+    .appendingPathComponent(".\(outputURL.lastPathComponent).tmp")
 let inputFile = try AVAudioFile(forReading: inputURL)
 let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                  sampleRate: 48_000,
                                  channels: 1,
                                  interleaved: false)!
-let outputFile = try AVAudioFile(forWriting: outputURL, settings: targetFormat.settings)
+let outputFile = try AVAudioFile(forWriting: tempOutputURL, settings: targetFormat.settings)
 let dsp = DeepFilterNetDSP()
 dsp.outputGain = options.gain
 dsp.suppressionStrength = min(max(options.strength, 0), 1)
 dsp.attenuationLimitDb = options.attenuationDb
 guard await dsp.waitUntilReady() else { throw DenoiseError.modelNotReady }
 ```
+
+After all chunks and tail samples are written successfully, move `tempOutputURL` to `outputURL` (replacing the destination only when `shouldOverwrite` is true). On any thrown error, remove the temp file and leave the existing destination untouched.
 
 Use a helper for format conversion:
 
