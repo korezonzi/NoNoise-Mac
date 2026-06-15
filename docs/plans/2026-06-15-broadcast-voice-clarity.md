@@ -10,7 +10,7 @@
 
 **GitHub Issue:** #1 — https://github.com/ivalsaraj/NoNoise-Mac/issues/1
 
-**Execution location:** All edits and commits go inside `/Users/valsaraj/Downloads/MetalVoice_v1.1/MetalVoice-src/`.
+**Execution location:** Run all commands from the package root — the `MetalVoice-src/` directory (where `Package.swift` lives). All paths in this plan are relative to that root.
 
 ---
 
@@ -61,7 +61,7 @@ Fixed constants (`ClarityProfile`): presence `4500 Hz` / `Q 0.7`; de-ess crossov
 - [ ] **Step 1: Create a feature branch** (repo is on `main` with unrelated working-tree changes — do NOT stage those)
 
 ```bash
-cd /Users/valsaraj/Downloads/MetalVoice_v1.1/MetalVoice-src
+# Run from the package root (the MetalVoice-src/ directory, where Package.swift lives)
 git checkout -b feat/broadcast-voice-clarity
 ```
 
