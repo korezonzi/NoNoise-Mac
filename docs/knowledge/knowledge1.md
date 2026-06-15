@@ -5,6 +5,21 @@ for the must-read failure modes.
 
 ---
 
+### [DECISION] 2026-06-15 — NoNoise Mic driver: two-device loopback topology, one canonical layout
+- **Topology:** a VISIBLE input-only device + a HIDDEN output-only "engine" device (NOT one duplex
+  device). The app renders cleaned audio to the engine; consumer apps pick the visible mic. Both
+  share ONE `nn_ring` + a per-device `nn_clock` anchored to a SINGLE host time captured on the first
+  `StartIO`, so the engine write axis and the mic read axis coincide.
+- **One canonical layout everywhere:** 48 kHz, 2ch, **interleaved** Float32 (`kAudioFormatFlagIsFloat
+  | kAudioFormatFlagIsPacked`). The HAL's `ioMainBuffer` is passed straight into `nn_ring`
+  (`channels=2`) — no de/interleave at any layer. `test_stereo_channels_preserved` guards L/R order
+  across a wrap.
+- **Phasing:** A1 = in-driver loopback (`sourceMode 0`, default, shipped); A2 = XPC + shared memory
+  (`sourceMode 1`) gated behind a coreaudiod-reachability spike. Cross-ref the silent-non-load
+  GOTCHA below.
+- **Why two devices, not duplex:** keeps the visible mic free of any output stream (clean picker
+  semantics) and the engine hidden + non-default-eligible. Full contract in `AGENTS.md` → driver section.
+
 ### [GOTCHA] 2026-06-15 — AudioServerPlugIn silently fails to load (signature / CFPlugIn keys)
 - **Symptom:** `NoNoiseMic.driver` installed to `/Library/Audio/Plug-Ins/HAL` but "NoNoise Mic"
   never appears as a device — and `coreaudiod` logs nothing obvious.
