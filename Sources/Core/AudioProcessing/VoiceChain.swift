@@ -3,7 +3,7 @@ import Foundation
 /// "Broadcast Voice" intensity. Drives a coupled presence lift + de-esser so the
 /// voice sounds clearer/more present while keeping its original identity. `.off`
 /// is a true no-op (presence bypassed, de-esser identity).
-public enum ClarityLevel: String, CaseIterable, Identifiable, Sendable {
+public enum ClarityLevel: String, CaseIterable, Identifiable, Codable, Sendable {
     case off
     case low
     case medium
