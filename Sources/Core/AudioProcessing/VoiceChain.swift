@@ -75,8 +75,9 @@ public struct VoiceChainSettings: Sendable, Equatable {
 }
 
 /// Time-domain voice-shaping chain: high-pass → low-shelf → high-shelf →
-/// compressor → limiter. Per-sample, allocation-free. `configure` runs on main;
-/// `process` runs on the render thread and no-ops when disabled.
+/// presence (peaking bell) → de-esser → compressor → limiter. Per-sample,
+/// allocation-free. `configure` runs on main; `process` runs on the render
+/// thread and no-ops when inactive (`enabled` and `clarity` both off).
 public final class VoiceChain {
     private let sampleRate: Float
     private var hp = Biquad()
