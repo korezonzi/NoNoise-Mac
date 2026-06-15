@@ -1,5 +1,58 @@
 import Foundation
 
+/// "Broadcast Voice" intensity. Drives a coupled presence lift + de-esser so the
+/// voice sounds clearer/more present while keeping its original identity. `.off`
+/// is a true no-op (presence bypassed, de-esser identity).
+public enum ClarityLevel: String, CaseIterable, Identifiable, Sendable {
+    case off
+    case low
+    case medium
+    case high
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .off:    return "Off"
+        case .low:    return "Low"
+        case .medium: return "Medium"
+        case .high:   return "High"
+        }
+    }
+
+    /// Presence (peaking-bell) lift in dB. Conservative by design — a gentle,
+    /// wide lift adds clarity without coloring the voice. Tunable starting points.
+    public var presenceDb: Float {
+        switch self {
+        case .off:    return 0
+        case .low:    return 1.5
+        case .medium: return 3
+        case .high:   return 4.5
+        }
+    }
+
+    /// Maximum de-ess reduction (dB) of the sibilant band. Scales WITH the
+    /// presence lift so added "air" never turns into harsh sibilance.
+    public var deEssMaxReductionDb: Float {
+        switch self {
+        case .off:    return 0
+        case .low:    return 4
+        case .medium: return 6
+        case .high:   return 8
+        }
+    }
+}
+
+/// Fixed band/timing constants for the Broadcast Voice stages (tunable starting points).
+enum ClarityProfile {
+    static let presenceHz: Float = 4500
+    static let presenceQ: Float = 0.7
+    static let deEssCrossoverHz: Float = 6000
+    static let deEssThresholdDb: Float = -28
+    static let deEssAttackMs: Float = 1
+    static let deEssReleaseMs: Float = 80
+}
+
 public struct VoiceChainSettings: Sendable, Equatable {
     public var enabled: Bool
     public var highPassHz: Float

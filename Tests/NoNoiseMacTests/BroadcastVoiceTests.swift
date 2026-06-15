@@ -87,6 +87,32 @@ final class BroadcastVoiceTests: XCTestCase {
         XCTAssertLessThan(maxDelta, 1e-3, "the de-esser must not touch the vocal body")
     }
 
+    // MARK: - ClarityLevel
+
+    func testClarityOffIsZero() {
+        XCTAssertEqual(ClarityLevel.off.presenceDb, 0)
+        XCTAssertEqual(ClarityLevel.off.deEssMaxReductionDb, 0)
+    }
+
+    func testClarityLevelsAreMonotonic() {
+        XCTAssertLessThan(ClarityLevel.low.presenceDb, ClarityLevel.medium.presenceDb)
+        XCTAssertLessThan(ClarityLevel.medium.presenceDb, ClarityLevel.high.presenceDb)
+        XCTAssertLessThan(ClarityLevel.low.deEssMaxReductionDb, ClarityLevel.medium.deEssMaxReductionDb)
+        XCTAssertLessThan(ClarityLevel.medium.deEssMaxReductionDb, ClarityLevel.high.deEssMaxReductionDb)
+    }
+
+    func testClarityCasesAndLabels() {
+        XCTAssertEqual(ClarityLevel.allCases, [.off, .low, .medium, .high])
+        XCTAssertEqual(ClarityLevel.off.label, "Off")
+        XCTAssertEqual(ClarityLevel.high.label, "High")
+    }
+
+    /// Presence is capped even at High — clarity must never become an aggressive EQ.
+    func testClarityPresenceIsConservativelyCapped() {
+        XCTAssertLessThanOrEqual(ClarityLevel.high.presenceDb, 5,
+                                 "presence lift stays gentle to preserve the original voice")
+    }
+
     // MARK: - Helpers
 
     /// Drive a steady sine through a biquad; return input/steady-state output RMS
