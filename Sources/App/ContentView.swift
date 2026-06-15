@@ -4,6 +4,8 @@ import Core
 
 struct ContentView: View {
     @ObservedObject var audioModel: AudioModel
+    @ObservedObject var dispatcher: ActionDispatcher
+    @ObservedObject var hotkeyManager: HotkeyManager
 
     var body: some View {
         VStack(spacing: 14) {
