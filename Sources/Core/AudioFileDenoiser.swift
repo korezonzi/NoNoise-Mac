@@ -26,6 +26,11 @@ public final class AudioFileDenoiser {
 
     public init() {}
 
+    /// Voice-chain settings for offline file mode (post-DFN polish).
+    public static func voiceChainSettings(for preset: VoicePreset) -> VoiceChainSettings {
+        preset.voiceChain
+    }
+
     public func denoise(_ options: AudioDenoiseOptions,
                         progress: ((Double) -> Void)? = nil) async throws {
         let fileManager = FileManager.default
@@ -76,6 +81,10 @@ public final class AudioFileDenoiser {
             throw DenoiseError.modelNotReady
         }
 
+        let chainSettings = Self.voiceChainSettings(for: options.preset)
+        let voiceChain = VoiceChain()
+        voiceChain.configure(chainSettings)
+
         let totalInputFrames = inputFile.length
         var sourceFramesRead: AVAudioFrameCount = 0
         var monoSamplesProcessed = 0
@@ -99,6 +108,7 @@ public final class AudioFileDenoiser {
                 outputSamples.withUnsafeMutableBufferPointer { outputPtr in
                     guard let base = outputPtr.baseAddress else { return }
                     dsp.process(input: inputPtr, count: count, output: base)
+                    voiceChain.process(base, count: count)
                 }
 
                 try write(samples: outputSamples, count: count, to: outputFile, format: targetFormat)
@@ -115,6 +125,7 @@ public final class AudioFileDenoiser {
                 tailOutput.withUnsafeMutableBufferPointer { outputPtr in
                     guard let inBase = inputPtr.baseAddress, let outBase = outputPtr.baseAddress else { return }
                     dsp.process(input: inBase, count: silence.count, output: outBase)
+                    voiceChain.process(outBase, count: silence.count)
                 }
             }
 

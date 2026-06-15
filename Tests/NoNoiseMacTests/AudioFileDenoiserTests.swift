@@ -25,6 +25,14 @@ final class AudioFileDenoiserTests: XCTestCase {
         await XCTAssertThrowsErrorAsync(try await denoiser.denoise(options))
     }
 
+    func testPodcastPresetEnablesVoiceChainForFileMode() {
+        XCTAssertTrue(AudioFileDenoiser.voiceChainSettings(for: .podcast).enabled)
+    }
+
+    func testMeetingPresetLeavesVoiceChainDisabledForFileMode() {
+        XCTAssertFalse(AudioFileDenoiser.voiceChainSettings(for: .meeting).enabled)
+    }
+
     func testDenoisesGeneratedWavToOutputFile() async throws {
         let temp = FileManager.default.temporaryDirectory
         let input = temp.appendingPathComponent("nonoise-test-input.wav")
