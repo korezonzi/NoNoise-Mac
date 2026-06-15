@@ -4,7 +4,7 @@
 
 **Goal:** Ship one shared **render-thread telemetry layer** that publishes lock-free scalars, and build two synergistic features on top of it: (1) a **Live HUD** — input/output level, sample-peak + a CLIP indicator, an "AI working hard" confidence signal, and added latency in ms; and (2) an **integrated LUFS loudness meter** (ITU-R BS.1770 K-weighting) with an optional **target-loudness normalization** stage (−14 / −16 LUFS) bounded by a true-peak-style ceiling that extends the existing `Limiter`.
 
-**Architecture:** A new pure value type **`LoudnessMeter`** (Core/AudioProcessing) implements BS.1770 K-weighting (high-shelf + high-pass `Biquad`) → mean-square → gated integration, plus sample-peak tracking — fully headless-testable. A new **`AudioTelemetry`** struct of plain lock-free scalars (mirroring the existing `DeepFilterNetDSP.outputGain` / `suppressionStrength` pattern — atomic 32-bit loads/stores on arm64, **no locks**) carries metering state from the render/DSP threads to the UI. The render callback writes input level, output level, sample-peak, clip count, added-latency, and (from `DeepFilterNetDSP`) an AI-confidence scalar derived from the model's per-bin gain reduction. A modest ~25 Hz `Timer` on `AudioModel` snapshots those scalars into `@Published` properties for SwiftUI. The HUD reuses `MeterView`; loudness normalization adds a pre-limiter auto-gain stage in `VoiceChain`, gated by a persisted `mv.*` toggle and target.
+**Architecture:** A new pure value type **`LoudnessMeter`** (Core/AudioProcessing) implements **real ITU-R BS.1770** K-weighting (the standard two-stage filter: a high-shelf "head" stage + an RLB high-pass stage, using the published 48 kHz biquad coefficients) → mean-square → gated integration, plus sample-peak tracking — fully headless-testable and validated at multiple frequencies against the BS.1770 calibration. The render/DSP threads publish metering state to the UI through plain **lock-free scalar snapshots** on `AudioModel` (mirroring the existing `DeepFilterNetDSP.outputGain` / `suppressionStrength` pattern — atomic 32-bit loads/stores on arm64, **no locks**). The `LoudnessMeter` value itself is **never read cross-thread**: it is mutated only on the render thread, which copies its plain getters into scalar snapshots (`tMomentaryLUFS`, `tIntegratedLUFS`, `tLoudnessSamplePeak`) that the UI timer reads — exactly like `inputLevel`. The render callback writes input level, output level, sample-peak, clip flag, added-latency, the LUFS snapshots, and (from `DeepFilterNetDSP`) an AI-confidence scalar derived from the model's per-bin gain reduction. A modest ~25 Hz `Timer` on `AudioModel` snapshots those scalars into `@Published` properties for SwiftUI. The HUD reuses `MeterView`; loudness normalization adds a pre-limiter auto-gain stage in `VoiceChain`, gated by a persisted `mv.*` toggle and target.
 
 **Tech Stack:** Swift 5.9, SwiftUI, Swift Package Manager, XCTest, Accelerate (per-sample scalar/biquad math; no CoreML dependency in any new pure type).
 
@@ -26,11 +26,11 @@ This plan satisfies it structurally (`docs/knowledge/critical-patterns.md` → "
 
 1. **Telemetry is plain `Float`/`Int32` scalars**, written from the render/DSP threads and read from main — exactly the `outputGain` / `suppressionStrength` / `attenuationLimitDb` pattern. 32-bit aligned scalar load/store is atomic on arm64. **No locks, no `os_unfair_lock`, no queues** in the hot path.
 2. **No allocation in `process`/`processHop`/the render callback.** Level/peak accumulation is scalar arithmetic over the existing in-place buffer; the AI-confidence accumulator reuses values already computed inside the per-bin blend loop.
-3. **All BS.1770 / loudness math lives in a pure, headless-testable value type** (`LoudnessMeter`) with no CoreAudio/CoreML dependency — same rule as `Biquad`/`Compressor`/`resolveOutputBin`. `AudioModel` itself is **not** unit-tested (its `init()` starts CoreAudio/AVFoundation); it is verified by `swift build` + the green Core suite + the manual smoke test.
+3. **All BS.1770 / loudness math lives in a pure, headless-testable value type** (`LoudnessMeter`) with no CoreAudio/CoreML dependency — same rule as `Biquad`/`Compressor`/`resolveOutputBin`. The `LoudnessMeter` **struct is never read from the main thread**: it is mutated only on the render thread, which copies its plain getters into lock-free scalar snapshots that the UI timer reads. `AudioModel` itself is **not** unit-tested (its `init()` starts CoreAudio/AVFoundation); it is verified by `swift build` + the green Core suite + the manual smoke test.
 4. **UI refresh is modest (~25 Hz), not per-sample.** A single `Timer.publish`/`Timer.scheduledTimer` on the main run loop snapshots the scalars into `@Published` properties — no needless polling, no per-buffer main-thread hops (the existing per-callback `inputLevel` `DispatchQueue.main.async` is **replaced** by the timer snapshot to cut main-thread churn).
 
 ### Honest scope calls (stated up front, per the perf mandate)
-- **Sample-peak + CLIP flag for v1, NOT oversampled true-peak.** True ITU-R BS.1770-4 true-peak requires ≥4× oversampling per channel on the render thread — too heavy for an always-on menu-bar utility on every buffer. v1 ships **sample-peak** detection plus a **clip indicator** (count of samples at/over a near-0 dBFS threshold). The loudness normalization ceiling is therefore a **sample-peak ceiling labeled −3 dB "peak"** (not certified dBTP). True-peak oversampling is explicitly deferred; the `LoudnessMeter` API leaves room to add it later without changing call sites. This is documented in the UI copy and in `CONCEPTS.md` so we never claim certified true-peak.
+- **Sample-peak + CLIP flag for v1, NOT oversampled true-peak.** True ITU-R BS.1770-4 true-peak requires ≥4× oversampling per channel on the render thread — too heavy for an always-on menu-bar utility on every buffer. v1 ships **sample-peak** detection plus a **latched best-effort clip flag** — the render callback STORES 1 when any sample reaches a near-0 dBFS threshold; the UI timer reads the flag, shows CLIP, then clears it. It is deliberately NOT a monotonic counter: a cross-thread `&+=` read-modify-write is not atomic, so we only ever store 0/1 (a single atomic store on arm64), and a flag missed for one ~40 ms tick is acceptable for a UX warning. The loudness normalization ceiling is a **sample-peak ceiling labeled −3 dB "peak"** (not certified dBTP). True-peak oversampling is explicitly deferred; the `LoudnessMeter` API leaves room to add it later without changing call sites. This is documented in the UI copy and in `CONCEPTS.md` so we never claim certified true-peak.
 - **Integrated (gated) LUFS as the headline number; momentary LUFS as the live needle.** Full BS.1770 integrated loudness gates with an absolute −70 LUFS gate **and** a relative −10 LU gate over the whole program — the relative gate needs the running mean of block loudnesses, which we keep as a streaming accumulator (no unbounded history). The HUD shows **momentary** loudness (400 ms window) as the live readout because it is cheap and responsive; the **integrated** number accumulates since the session/meter reset. Both come from the same `LoudnessMeter`. Short-term (3 s) is **not** shown in v1 (no third window) — stated so reviewers don't expect it.
 - **AI-confidence is a derived heuristic, not a model output.** DeepFilterNet3 does not emit a "confidence". We derive an **activity** signal = average per-bin gain reduction the blend applied this hop (`1 − wetMag/dryMag`, clamped 0…1, energy-weighted), smoothed. High value = "AI is working hard" (lots of noise being removed). This is computed inside the existing blend loop in `DeepFilterNetDSP.processHop`, where `wetMag`/`dryMag` are already needed for the attenuation floor — near-zero extra cost. It is a UX hint, labeled as such; it is **not** a quality guarantee.
 
@@ -41,15 +41,15 @@ This plan satisfies it structurally (`docs/knowledge/critical-patterns.md` → "
 - **Lock-free scalar pattern** is already blessed: `DeepFilterNetDSP.outputGain` / `suppressionStrength` / `attenuationLimitDb` are plain `public var Float`, written from main, read on the render thread (`AGENTS.md` → "Presets & intensity knobs"; `critical-patterns.md` → "Suppression knobs are lock-free scalars"). Telemetry scalars are the **reverse direction** (render→main) but the same atomicity argument holds on arm64.
 - **The blend loop** (`DeepFilterNetDSP.processHop`, lines ~498–509) iterates 481 bins, reading `wetR/wetI` (enhanced) and `rawSpecScratch` (dry) and calling `resolveOutputBin`. `resolveOutputBin` already computes `dryMag`/`wetMag` when `minGain > 0`. The AI-activity accumulator hooks in here.
 - **`VoiceChain`** (`Sources/Core/AudioProcessing/VoiceChain.swift`) runs `hp → lowShelf → highShelf → presence → deEsser → comp → limiter` per sample (the Broadcast Voice stages already landed). `configure(_:)` recomputes coefficients on **main**; `process(_:count:)` runs on the **render thread**, allocation-free. The **limiter is last** and is the final ceiling guard. Loudness normalization adds a scalar make-up gain **before** the limiter.
-- **`Biquad`** (`Sources/Core/AudioProcessing/Biquad.swift`) is a TDF-II RBJ biquad with `setBypass / setHighPass / setLowShelf / setHighShelf / setPeaking`, a `dcGain` test helper, and `process`. BS.1770 K-weighting needs a **high-shelf** (stage 1) and a **high-pass** (stage 2) — both already exist; no new `Biquad` factory is required.
+- **`Biquad`** (`Sources/Core/AudioProcessing/Biquad.swift`) is a TDF-II RBJ biquad with `setBypass / setHighPass / setLowShelf / setHighShelf / setPeaking`, a `dcGain` test helper, and `process`. Its coefficients are `private`. **Real BS.1770 K-weighting needs the *exact* published two-stage coefficients**, not RBJ approximations — so Task 1 adds one small public method `setCoefficients(b0:b1:b2:a1:a2:)` to `Biquad` (a direct normalized-coefficient setter, additive and backward-compatible) and feeds it the standard 48 kHz K-weighting numbers. No existing `Biquad` behavior changes.
 - **`Limiter`** (`Sources/Core/AudioProcessing/Dynamics.swift`) is `configure(ceilingDb:releaseMs:sampleRate:)` + per-sample `process` with a hard clamp. The normalization ceiling reuses this — we do **not** write a second limiter.
 - **Persistence** uses the `mv.*` namespace via the `PrefKey` enum (`AudioModel.swift:114`), `persistSettings()` (~263), `loadSettings()` (~272), guarded by `isApplyingPreset`. New keys: `mv.loudnessNorm` (Bool) + `mv.loudnessTarget` (Float).
 - **Tests** live in `Tests/NoNoiseMacTests/` (`@testable import Core`), run headless with `swift test`. Style references: `VoiceChainTests.swift`, `NoNoiseMacDSPTests.swift` (pure static-helper tests), `BroadcastVoiceTests.swift`.
 - **UI:** `ContentView.swift` has `statusCard` (which already hosts `MeterView(level: audioModel.inputLevel)`), the shared `MeterView`, and the `nnCard()` modifier. `SettingsView.swift` → `GeneralSettingsView` has `suppressionCard` / `gainCard` and the `sliderRow(...)` / `sectionHeader(...)` helpers.
 
 ### Design decisions
-- **One telemetry value type, snapshotted once per UI tick.** `AudioTelemetry` is a small struct of scalars living on `AudioModel` (the engine owns the truth). The render/DSP threads write its fields directly; a ~25 Hz timer reads them and assigns the `@Published` mirror properties. Rationale: a single source, a single main-thread touch-point, zero locks.
-- **`LoudnessMeter` is the single source of loudness math** (mirroring how `resolveOutputBin`/`minGain` own the blend math and `Biquad` owns filter math). It owns K-weighting, momentary + integrated computation, gating, and sample-peak. It is `Sendable`-friendly value semantics and 100% unit-tested against known BS.1770 reference values (e.g. a −23 LUFS / −40 LUFS calibration tone).
+- **One set of telemetry scalars, snapshotted once per UI tick.** The metering scalars live directly on `AudioModel` (the engine owns the truth). The render/DSP threads write them directly; a ~25 Hz timer reads them and assigns the `@Published` mirror properties. The `LoudnessMeter` struct is **owned and mutated only on the render thread** — the render callback copies its `momentaryLUFS` / `integratedLUFS` / `samplePeak` getters into `tMomentaryLUFS` / `tIntegratedLUFS` / `tLoudnessSamplePeak` scalars; the timer reads only those scalars, never the meter object. Rationale: a single source, a single main-thread touch-point, zero locks, no cross-thread struct access.
+- **`LoudnessMeter` is the single source of loudness math** (mirroring how `resolveOutputBin`/`minGain` own the blend math and `Biquad` owns filter math). It owns real BS.1770 K-weighting (the standard two-stage shelf + RLB high-pass with the published 48 kHz coefficients), momentary + integrated computation, gating, and sample-peak. It is `Sendable`-friendly value semantics and 100% unit-tested against known BS.1770 reference values at **multiple frequencies** (the 1 kHz mono calibration tone plus a low-frequency and a high-frequency check that bound the K-weighting curve).
 - **Loudness normalization is a gentle scalar auto-gain toward target, computed on main, applied as a lock-free scalar in `VoiceChain` before the limiter.** The meter (running on the DSP/render side) reports integrated/momentary loudness; the main-thread timer computes a target gain (`target − measured`, slew-limited to avoid pumping, clamped to a sane range e.g. ±12 dB) and writes a `loudnessGain` scalar that `VoiceChain.process` multiplies in. The limiter (−3 dB-labeled ceiling) catches any resulting peak. No new render-thread allocation; no per-sample gain solving.
 - **Normalization is OFF by default.** Default behavior is byte-for-byte unchanged (gain = 1.0, meter purely passive/observational). Persisted under `mv.loudnessNorm` / `mv.loudnessTarget` (default target −14 LUFS).
 - **Tuning values are documented starting points**, tunable after listening (same convention as the presets and Broadcast Voice).
@@ -61,11 +61,20 @@ This plan satisfies it structurally (`docs/knowledge/critical-patterns.md` → "
 | `inputLevel` | `Float` | render callback (pre-DSP RMS) | mic level 0…~1 (existing semantics, moved to telemetry) |
 | `outputLevel` | `Float` | render callback (post-chain RMS) | cleaned/processed output level |
 | `samplePeak` | `Float` | render callback (post-chain max\|x\|) | peak magnitude this window |
-| `clipCount` | `Int32` | render callback (count ≥ clip threshold) | monotonic clip counter → UI shows a clip flag |
+| `tClipFlag` | `Int32` | render callback (set 1 when a sample ≥ clip threshold) | latched best-effort clip flag → UI shows CLIP, cleared each tick |
 | `aiActivity` | `Float` | `DeepFilterNetDSP.processHop` blend loop | smoothed avg gain reduction 0…1 ("AI working hard") |
-| `momentaryLUFS` | `Float` | `LoudnessMeter` (via DSP side) | live 400 ms loudness (−∞…0) |
-| `integratedLUFS` | `Float` | `LoudnessMeter` (via DSP side) | gated integrated loudness since reset |
+| `tMomentaryLUFS` | `Float` | render callback (snapshot of `LoudnessMeter.momentaryLUFS`) | live 400 ms loudness (−∞…0) |
+| `tIntegratedLUFS` | `Float` | render callback (snapshot of `LoudnessMeter.integratedLUFS`) | gated integrated loudness since reset |
+| `tLoudnessSamplePeak` | `Float` | render callback (snapshot of `LoudnessMeter.samplePeak`) | post-chain sample-peak since reset |
 | `addedLatencyMs` | `Float` | main (from constants) | fixed pipeline latency readout |
+
+### Telemetry update predicate (one canonical rule)
+There is exactly **one** rule for when each scalar updates, used identically in Task 6 and the manual smoke test:
+- **Render-side telemetry** (`outputLevel`, `outputPeak`, `tClipFlag`, `tMomentaryLUFS`, `tIntegratedLUFS`, `tLoudnessSamplePeak`, and `aiActivity`) is written **only inside the `if isAIEnabled` render branch** (after `dsp.process` / `chain.process`). So it is live **only while Noise Cancellation is ON**; when AI is OFF these hold their last value.
+- **`inputLevel`** is the one exception: written in `captureOutput`, it updates **whenever audio is captured**, regardless of `isAIEnabled`.
+- `addedLatencyMs` is a one-time constant (set in `init`).
+
+Do NOT describe these any other way elsewhere in the plan — this table + rule are authoritative.
 
 ---
 
@@ -84,9 +93,10 @@ Expected: `Switched to a new branch 'feat/metering-and-loudness'`. Throughout th
 
 ## Task 1: `LoudnessMeter` — BS.1770 K-weighting + momentary loudness — TDD
 
-The pure loudness value type. Start with K-weighting and the momentary (400 ms) measurement, validated against a known calibration tone.
+The pure loudness value type. Start with **real ITU-R BS.1770** K-weighting and the momentary (400 ms) measurement, validated against the standard calibration tone at multiple frequencies.
 
 **Files:**
+- Modify: `Sources/Core/AudioProcessing/Biquad.swift` (add a direct-coefficient setter)
 - Create: `Sources/Core/AudioProcessing/LoudnessMeter.swift`
 - Create: `Tests/NoNoiseMacTests/LoudnessMeterTests.swift`
 
@@ -105,30 +115,51 @@ final class LoudnessMeterTests: XCTestCase {
         XCTAssertEqual(m.integratedLUFS, LoudnessMeter.silenceLUFS, accuracy: 1e-3)
     }
 
-    /// BS.1770 calibration: a 1 kHz sine at −20 dBFS reads ≈ −23 LUFS mono
-    /// (the standard −3 LU mono offset). Tolerance is generous — K-weighting at
-    /// 1 kHz is near 0 dB and the standard's reference tone is well-defined.
-    func testKWeighted1kSineReadsCalibratedLUFS() {
+    /// Feed `seconds` of a sine at `freq`/`dbfs` into a fresh meter and return its
+    /// momentary LUFS. Helper so the calibration tests stay readable.
+    private func measureMomentaryLUFS(freq: Float, dbfs: Float, seconds: Float = 0.6) -> Float {
         var m = LoudnessMeter(sampleRate: 48000)
-        let amp: Float = powf(10, -20.0 / 20.0)          // −20 dBFS peak
-        // Feed > 400 ms so the momentary window is full.
-        for i in 0..<24000 {
-            m.process(amp * sinf(2 * Float.pi * 1000 * Float(i) / 48000))
-        }
-        XCTAssertEqual(m.momentaryLUFS, -23.0, accuracy: 1.0,
+        let amp = powf(10, dbfs / 20.0)
+        let n = Int(seconds * 48000)
+        for i in 0..<n { m.process(amp * sinf(2 * Float.pi * freq * Float(i) / 48000)) }
+        return m.momentaryLUFS
+    }
+
+    /// BS.1770 calibration anchor: a 1 kHz sine at −20 dBFS reads ≈ −23 LUFS mono
+    /// (the standard −3.01 LU mono offset; the K-weighting gain at 1 kHz is ≈ 0 dB).
+    /// Tolerance is tight (±0.5 LU) because REAL BS.1770 coefficients must hit the
+    /// reference, not merely approximate it.
+    func testKWeighted1kSineReadsCalibratedLUFS() {
+        XCTAssertEqual(measureMomentaryLUFS(freq: 1000, dbfs: -20), -23.0, accuracy: 0.5,
                        "−20 dBFS 1 kHz sine must read ≈ −23 LUFS (BS.1770 mono)")
+    }
+
+    /// The K-weighting RLB high-pass attenuates low frequencies: a 60 Hz tone at the
+    /// SAME −20 dBFS reads several LU QUIETER than the 1 kHz reference (the curve dips
+    /// well below 0 dB at 60 Hz). This proves the high-pass stage is real, not a no-op.
+    func testKWeightingAttenuatesLowFrequency() {
+        let ref = measureMomentaryLUFS(freq: 1000, dbfs: -20)
+        let low = measureMomentaryLUFS(freq: 60,   dbfs: -20)
+        XCTAssertLessThan(low, ref - 1.0,
+                          "BS.1770 K-weighting must roll off 60 Hz below the 1 kHz reference")
+    }
+
+    /// The K-weighting high-shelf boosts highs: a 6 kHz tone at the SAME −20 dBFS reads
+    /// LOUDER than the 1 kHz reference (the +4 dB shelf is fully engaged above ~2 kHz).
+    /// This proves the shelf stage is real and lifts (not flattens) the top end.
+    func testKWeightingBoostsHighFrequency() {
+        let ref  = measureMomentaryLUFS(freq: 1000, dbfs: -20)
+        let high = measureMomentaryLUFS(freq: 6000, dbfs: -20)
+        XCTAssertGreaterThan(high, ref + 1.0,
+                             "BS.1770 K-weighting high-shelf must lift 6 kHz above the 1 kHz reference")
     }
 
     /// Louder in ⇒ higher (less negative) LUFS — monotonic.
     func testLouderInputReadsHigherLUFS() {
-        func measure(_ dbfs: Float) -> Float {
-            var m = LoudnessMeter(sampleRate: 48000)
-            let amp = powf(10, dbfs / 20.0)
-            for i in 0..<24000 { m.process(amp * sinf(2 * Float.pi * 1000 * Float(i) / 48000)) }
-            return m.momentaryLUFS
-        }
-        XCTAssertGreaterThan(measure(-12), measure(-20))
-        XCTAssertGreaterThan(measure(-20), measure(-30))
+        XCTAssertGreaterThan(measureMomentaryLUFS(freq: 1000, dbfs: -12),
+                             measureMomentaryLUFS(freq: 1000, dbfs: -20))
+        XCTAssertGreaterThan(measureMomentaryLUFS(freq: 1000, dbfs: -20),
+                             measureMomentaryLUFS(freq: 1000, dbfs: -30))
     }
 
     /// Sample-peak tracks the true max magnitude fed since reset.
@@ -154,25 +185,45 @@ final class LoudnessMeterTests: XCTestCase {
 Run: `swift test --filter LoudnessMeterTests`
 Expected: compile error — `cannot find 'LoudnessMeter' in scope`.
 
-- [ ] **Step 3: Implement `LoudnessMeter` (K-weighting + momentary + sample-peak)** — create `Sources/Core/AudioProcessing/LoudnessMeter.swift`
+- [ ] **Step 3: Add a direct-coefficient setter to `Biquad`** — `Sources/Core/AudioProcessing/Biquad.swift`
+
+The RBJ factories cannot reproduce the *exact* BS.1770 filter, so add a small public setter for pre-computed normalized coefficients (additive — no existing behavior changes). Place it next to `setBypass()`:
+
+```swift
+    /// Set pre-computed, already-normalized (a0 == 1) biquad coefficients directly.
+    /// Used for filters whose coefficients are specified by a standard (e.g. the
+    /// ITU-R BS.1770 K-weighting stages) rather than derived from an RBJ formula.
+    public mutating func setCoefficients(b0: Float, b1: Float, b2: Float, a1: Float, a2: Float) {
+        self.b0 = b0; self.b1 = b1; self.b2 = b2; self.a1 = a1; self.a2 = a2
+    }
+```
+
+- [ ] **Step 4: Implement `LoudnessMeter` (real BS.1770 K-weighting + momentary + sample-peak)** — create `Sources/Core/AudioProcessing/LoudnessMeter.swift`
 
 ```swift
 import Foundation
 
-/// ITU-R BS.1770 (K-weighted) loudness meter — a pure, allocation-free value
-/// type. Stage 1 = high-shelf "head" filter; stage 2 = high-pass; then mean-square
-/// over a sliding momentary window (400 ms). Mono measurement applies the standard
-/// −0.691 dB calibration offset. Integrated (gated) loudness is added in Task 2.
+/// ITU-R BS.1770 (K-weighted) loudness meter — a pure, allocation-free value type.
+/// Stage 1 = the "pre-filter" head high-shelf (≈ +4 dB above ~1.5 kHz); stage 2 =
+/// the RLB high-pass (≈ −3 dB at ~38 Hz). Both use the STANDARD's published 48 kHz
+/// biquad coefficients (not RBJ approximations) so the meter reads true BS.1770
+/// loudness across the spectrum. Then: K-weighted mean-square over a sliding
+/// momentary window (400 ms). Mono measurement applies the standard −0.691 dB
+/// calibration offset. Integrated (gated) loudness is added in Task 2.
 ///
 /// Sample-peak is tracked alongside (NOT certified true-peak — see CONCEPTS.md;
 /// oversampled dBTP is deferred for the Apple-Silicon perf mandate).
+///
+/// IMPORTANT: this struct is mutated ONLY on the render thread. `AudioModel` copies
+/// its scalar getters into lock-free telemetry snapshots; it is never read from the
+/// main thread (no cross-thread struct access — see the plan's Architecture note).
 public struct LoudnessMeter {
     /// Sentinel "silence" value (well below the BS.1770 absolute gate of −70 LUFS).
     public static let silenceLUFS: Float = -120
 
     private let sampleRate: Float
-    private var shelf = Biquad()       // K-weighting stage 1 (high-shelf)
-    private var hp = Biquad()          // K-weighting stage 2 (high-pass)
+    private var shelf = Biquad()       // K-weighting stage 1 (head high-shelf)
+    private var hp = Biquad()          // K-weighting stage 2 (RLB high-pass)
 
     // Momentary window: sum of K-weighted mean-square over the last ~400 ms.
     private var momentaryRing: [Float]
@@ -184,12 +235,21 @@ public struct LoudnessMeter {
 
     public init(sampleRate: Float = 48000) {
         self.sampleRate = sampleRate
-        // BS.1770 K-weighting coefficients are defined at 48 kHz. We approximate
-        // with RBJ primitives: a +4 dB high-shelf near 1.5 kHz then an ~38 Hz
-        // high-pass. (Exact biquad coefficients can be substituted later without
-        // changing the API; the calibration test bounds the error.)
-        shelf.setHighShelf(freq: 1500, gainDb: 4, sampleRate: sampleRate)
-        hp.setHighPass(freq: 38, sampleRate: sampleRate, q: 0.5)
+        // The published BS.1770 K-weighting coefficients below are defined at 48 kHz,
+        // which is the engine's fixed render rate (see AGENTS.md DSP invariants). Guard
+        // the assumption so a future rate change fails loudly instead of mis-measuring.
+        assert(sampleRate == 48000, "BS.1770 K-weighting coefficients assume 48 kHz")
+        // ITU-R BS.1770 K-weighting — the standard's two-stage filter, specified
+        // directly as 48 kHz biquad coefficients (BS.1770-4 Tables 1 & 2). These are
+        // the canonical, widely-published numbers; do NOT swap in RBJ approximations
+        // (the multi-frequency calibration tests bound the error tightly).
+        //
+        // Stage 1: head/pre-filter high-shelf (+4 dB shelf, ~1.5 kHz hinge).
+        shelf.setCoefficients(b0: 1.53512485958697, b1: -2.69169618940638, b2: 1.19839281085285,
+                              a1: -1.69065929318241, a2: 0.73248077421585)
+        // Stage 2: RLB high-pass (~38 Hz, removes sub-bass energy from the measure).
+        hp.setCoefficients(b0: 1.0, b1: -2.0, b2: 1.0,
+                           a1: -1.99004745483398, a2: 0.99007225036621)
         let windowLen = max(1, Int(0.4 * sampleRate))   // 400 ms momentary window
         momentaryRing = [Float](repeating: 0, count: windowLen)
     }
@@ -236,16 +296,16 @@ public struct LoudnessMeter {
 }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `swift test --filter LoudnessMeterTests`
-Expected: 5 tests PASS. (If the calibration test misses, adjust the shelf gain/freq within the ±1 LU tolerance — the test bounds the K-weighting approximation; do not loosen the tolerance.)
+Expected: 7 tests PASS (silence, 1 kHz calibration, low-freq roll-off, high-freq lift, monotonic, sample-peak, reset). The calibration tone and the two frequency-shape tests pass because the coefficients are the REAL BS.1770 numbers — do NOT loosen the tolerances or swap in RBJ approximations; if a frequency test fails, the coefficients were mistranscribed.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add Sources/Core/AudioProcessing/LoudnessMeter.swift Tests/NoNoiseMacTests/LoudnessMeterTests.swift
-git commit -m "feat(dsp): add LoudnessMeter (BS.1770 K-weighting + momentary LUFS + sample-peak)"
+git add Sources/Core/AudioProcessing/Biquad.swift Sources/Core/AudioProcessing/LoudnessMeter.swift Tests/NoNoiseMacTests/LoudnessMeterTests.swift
+git commit -m "feat(dsp): add LoudnessMeter (real BS.1770 K-weighting + momentary LUFS + sample-peak)"
 ```
 
 ---
@@ -303,43 +363,80 @@ Expected: the three new tests FAIL (integrated currently just mirrors momentary 
 
 - [ ] **Step 3: Add gated integration** to `LoudnessMeter`
 
-Add block-accumulation state (alongside the momentary state):
+> **CRITICAL real-time-safety rule (do not violate):** block finalization runs inside `process(_:)` on the render thread. It must be **allocation-free** — NEVER `append`/`removeFirst`/grow any array. The per-block mean-square values for the relative gate are stored in a **pre-allocated fixed-size ring** written by index with wraparound. The ring is a bounded rolling window (the last `maxBlocks` absolute-gated blocks) — long past any realtime session — so memory is fixed and the relative gate stays accurate for the whole program. This mirrors the momentary ring; no unbounded history, no render-path allocation.
+
+Add block-accumulation state (alongside the momentary state). The `blockMSRing` is **pre-allocated once in `init`** and written by index — exactly like `momentaryRing`:
 
 ```swift
-    // Integrated (gated) state — per 400 ms block. We keep only running sums so
-    // there is no unbounded history (one streaming accumulator, not a sample log).
-    private var blockLen = 0
-    private var blockCount = 0
-    private var blockMeanSquareSum: Float = 0   // mean-square accumulated in the current block
-    private var blockSamples = 0
-    // Absolute-gate-passing blocks: count + Σ mean-square (for the relative gate's threshold)
+    // Integrated (gated) state — per 400 ms block. Running sums + a fixed-size ring
+    // of absolute-gated block mean-squares for the relative gate. NO growth: the ring
+    // is pre-allocated and written by index (wraparound), so process() never allocates.
+    private var blockLen = 0                    // samples per 400 ms block (set in init)
+    private var blockMeanSquareSum: Float = 0   // Σ mean-square accumulated in the current block
+    private var blockSamples = 0                // samples seen in the current block
+    // Absolute-gate-passing blocks: count + Σ mean-square (for the relative gate's threshold).
     private var absGatedCount = 0
     private var absGatedMSSum: Float = 0
-    // Relative-gate-passing blocks: the integrated answer comes from these.
-    private struct GatedAccumulator { var count = 0; var msSum: Float = 0 }
-    private var blockMSLog: [Float] = []   // bounded? see note below
+    // Fixed-size ring of absolute-gated block mean-squares (the relative-gate input).
+    // Pre-allocated; write-by-index with wraparound — NEVER appended to on the render path.
+    private static let maxBlocks = 9000         // 9000 × 400 ms = 1 h rolling window (bounded)
+    private var blockMSRing: [Float]            // count == maxBlocks (allocated in init)
+    private var blockMSRingHead = 0             // next write slot (wraps at maxBlocks)
+    private var blockMSRingFilled = 0           // how many slots hold real data (≤ maxBlocks)
 ```
 
-> **Implementation note for the executor:** the relative gate needs to re-test every absolute-gated block against a threshold derived from the mean of all absolute-gated blocks. The simplest correct implementation keeps the per-block mean-square values for absolute-gated blocks in `blockMSLog`. To honor "no unbounded history", cap `blockMSLog` to a rolling window of the last N blocks (e.g. N = 7500 ≈ 50 min of program) — long past any realtime session, bounded memory. Document this cap in the file header and `CONCEPTS.md`. If the executor prefers an exact-but-bounded approach, a two-pass-free relative gate can be approximated by recomputing the relative threshold from `absGatedMSSum/absGatedCount` and applying it to the logged blocks; either is acceptable as long as the three tests pass.
+In `init`, set `blockLen = max(1, Int(0.4 * sampleRate))` and pre-allocate the ring:
 
-Implement block finalization inside `process(_:)` (after the momentary update): accumulate `blockMeanSquareSum += sq; blockSamples += 1`; when `blockSamples == blockLen` (set `blockLen = Int(0.4 * sampleRate)` in `init`), finalize the block (compute its mean-square, push to the absolute-gate accumulators / log if its loudness > −70 LUFS), reset the block accumulators, and `blockCount += 1`. Compute `integratedLUFS` from the relative-gated set:
+```swift
+        blockLen = max(1, Int(0.4 * sampleRate))
+        blockMSRing = [Float](repeating: 0, count: Self.maxBlocks)
+```
+
+> **Note:** because a stored property (`blockMSRing`) is referenced before all stored properties are initialized in some orderings, declare `blockMSRing` with a default empty-but-replaced value is NOT allowed for a `let`; keep it a `var` and assign the full-size buffer in `init` before first use (the `momentaryRing` pattern). The 1 h window is far longer than any realtime session, so the rolling cap never affects a real measurement; it only bounds memory.
+
+Implement block finalization inside `process(_:)` (after the momentary update) — **allocation-free, write-by-index only**:
+
+```swift
+        // Integrated (gated) block accumulation — runs on the render thread, no alloc.
+        blockMeanSquareSum += sq
+        blockSamples += 1
+        if blockSamples >= blockLen {
+            let blockMS = blockMeanSquareSum / Float(blockSamples)
+            // Absolute gate: keep only blocks louder than the −70 LUFS floor.
+            if Self.loudness(meanSquare: blockMS) > -70 {
+                absGatedCount += 1
+                absGatedMSSum += blockMS
+                // Write into the fixed ring by index (wraparound) — never append.
+                blockMSRing[blockMSRingHead] = blockMS
+                blockMSRingHead += 1
+                if blockMSRingHead == Self.maxBlocks { blockMSRingHead = 0 }
+                if blockMSRingFilled < Self.maxBlocks { blockMSRingFilled += 1 }
+            }
+            blockMeanSquareSum = 0
+            blockSamples = 0
+        }
+```
+
+Compute `integratedLUFS` from the relative-gated set (iterates the fixed ring — no allocation):
 
 ```swift
     public var integratedLUFS: Float {
-        guard absGatedCount > 0 else { return Self.silenceLUFS }
+        guard blockMSRingFilled > 0, absGatedCount > 0 else { return Self.silenceLUFS }
         // Relative gate: −10 LU below the mean loudness of absolute-gated blocks.
+        // (Mean uses the running absGatedMSSum/absGatedCount; the ring bounds memory.)
         let absMeanMS = absGatedMSSum / Float(absGatedCount)
         let relThresholdMS = absMeanMS * powf(10, -10.0 / 10.0)   // −10 LU in the power domain
-        var acc = GatedAccumulator()
-        for ms in blockMSLog where ms >= relThresholdMS {
-            acc.count += 1; acc.msSum += ms
+        var count = 0
+        var msSum: Float = 0
+        for i in 0..<blockMSRingFilled where blockMSRing[i] >= relThresholdMS {
+            count += 1; msSum += blockMSRing[i]
         }
-        guard acc.count > 0 else { return Self.loudness(meanSquare: absMeanMS) }
-        return Self.loudness(meanSquare: acc.msSum / Float(acc.count))
+        guard count > 0 else { return Self.loudness(meanSquare: absMeanMS) }
+        return Self.loudness(meanSquare: msSum / Float(count))
     }
 ```
 
-Update `reset()` and `init()` to clear/initialize the new block state. (Remove the temporary `integratedLUFS { momentaryLUFS }` from Task 1.)
+Update `reset()` to clear the new block state (`blockMeanSquareSum = 0; blockSamples = 0; absGatedCount = 0; absGatedMSSum = 0; blockMSRingHead = 0; blockMSRingFilled = 0` and zero `blockMSRing`). (Remove the temporary `integratedLUFS { momentaryLUFS }` from Task 1.)
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -554,12 +651,12 @@ git commit -m "feat(dsp): derive AI-activity telemetry from per-bin suppression"
 
 ---
 
-## Task 5: Loudness normalization gain in `VoiceChain` — TDD
+## Task 5: Loudness normalization gain + activation in `VoiceChain` — TDD
 
-Carry a `loudnessGain` lock-free scalar on `VoiceChain`, applied as a pre-limiter make-up multiply. Default 1.0 (no-op). The limiter (already last) is the ceiling guard.
+Carry a `loudnessGain` lock-free scalar on `VoiceChain`, applied as a pre-limiter make-up multiply (default 1.0 / no-op; the limiter — already last — is the ceiling guard), AND add a `loudnessActive` activation reason to `VoiceChainSettings` so the limiter + make-up run even when polish and clarity are both off. The activation predicate and its test live together here (the contract); `AudioModel.applyVoiceChain()` sets `s.loudnessActive = loudnessNormEnabled` in Task 6 — they move as a pair.
 
 **Files:**
-- Modify: `Sources/Core/AudioProcessing/VoiceChain.swift` (scalar + apply before limiter)
+- Modify: `Sources/Core/AudioProcessing/VoiceChain.swift` (scalar + apply before limiter + `loudnessActive` activation)
 - Modify: `Tests/NoNoiseMacTests/VoiceChainTests.swift` (add tests)
 
 - [ ] **Step 1: Write the failing tests** — add inside `VoiceChainTests`
@@ -578,20 +675,23 @@ Carry a `loudnessGain` lock-free scalar on `VoiceChain`, applied as a pre-limite
     }
 
     /// A loudnessGain > 1 boosts the signal (still within the limiter ceiling).
+    /// TWO separately-configured chains: one at gain 2.0, one at gain 1.0, fed
+    /// IDENTICAL input. The 2.0 chain must end louder. (The earlier version mutated
+    /// the gain back to 1.0 on the same chain before processing — a no-op test.)
     func testLoudnessGainBoostsWhenActive() {
-        let chain = VoiceChain()
-        chain.configure(VoicePreset.podcast.voiceChain)  // chain active (polish on)
-        chain.setLoudnessGain(2.0)
-        var loud = [Float](repeating: 0.1, count: 4800)
-        var quiet = [Float](repeating: 0.1, count: 4800)
-        chain.setLoudnessGain(1.0)
-        let chain2 = VoiceChain(); chain2.configure(VoicePreset.podcast.voiceChain)
-        loud.withUnsafeMutableBufferPointer  { chain.process($0.baseAddress!, count: $0.count) }
-        quiet.withUnsafeMutableBufferPointer { chain2.process($0.baseAddress!, count: $0.count) }
-        // The 2.0-gain chain must end louder than the 1.0-gain chain (both under ceiling).
+        let boosted = VoiceChain(); boosted.configure(VoicePreset.podcast.voiceChain)
+        boosted.setLoudnessGain(2.0)
+        let unity = VoiceChain(); unity.configure(VoicePreset.podcast.voiceChain)
+        unity.setLoudnessGain(1.0)
+        // Low-level input so neither chain hits the limiter ceiling (isolate the gain).
+        var loud  = [Float](repeating: 0.02, count: 4800)
+        var quiet = [Float](repeating: 0.02, count: 4800)
+        loud.withUnsafeMutableBufferPointer  { boosted.process($0.baseAddress!, count: $0.count) }
+        quiet.withUnsafeMutableBufferPointer { unity.process($0.baseAddress!,   count: $0.count) }
         let rmsLoud  = sqrtf(loud.reduce(0)  { $0 + $1*$1 } / Float(loud.count))
         let rmsQuiet = sqrtf(quiet.reduce(0) { $0 + $1*$1 } / Float(quiet.count))
-        XCTAssertGreaterThan(rmsLoud, rmsQuiet)
+        XCTAssertGreaterThan(rmsLoud, rmsQuiet,
+                             "the 2.0-gain chain must end louder than the 1.0-gain chain")
     }
 
     /// Even with a large loudnessGain, the limiter still caps output at the ceiling.
@@ -604,6 +704,40 @@ Carry a `loudnessGain` lock-free scalar on `VoiceChain`, applied as a pre-limite
         let ceiling = powf(10, -1.0 / 20.0)      // podcast limiter ceiling
         XCTAssertTrue(buf.allSatisfy { abs($0) <= ceiling + 1e-3 }, "limiter must still hold the ceiling")
     }
+
+    // MARK: - loudnessActive activation (polish + clarity both off)
+
+    /// `loudnessActive == true` ALONE activates the chain (limiter + make-up gain)
+    /// even when polish and clarity are off — so normalization works in Meeting mode.
+    func testLoudnessActiveAloneActivatesGainAndLimiter() {
+        var s = VoiceChainSettings.disabled        // polish off, clarity off
+        s.loudnessActive = true
+        let chain = VoiceChain()
+        chain.configure(s)
+        XCTAssertTrue(chain.isActive, "loudnessActive alone must activate the chain")
+        chain.setLoudnessGain(2.0)
+        var buf = [Float](repeating: 0.02, count: 4800)
+        let input = buf
+        buf.withUnsafeMutableBufferPointer { chain.process($0.baseAddress!, count: $0.count) }
+        let rmsOut = sqrtf(buf.reduce(0)  { $0 + $1*$1 } / Float(buf.count))
+        let rmsIn  = sqrtf(input.reduce(0) { $0 + $1*$1 } / Float(input.count))
+        XCTAssertGreaterThan(rmsOut, rmsIn, "make-up gain must apply when loudnessActive activates the chain")
+    }
+
+    /// With every feature off (polish off, clarity off, loudnessActive false), output
+    /// is byte-for-byte unchanged — the chain is inactive and never touches samples.
+    func testDisabledChainWithLoudnessInactiveIsUnchanged() {
+        var s = VoiceChainSettings.disabled
+        s.loudnessActive = false
+        let chain = VoiceChain()
+        chain.configure(s)
+        XCTAssertFalse(chain.isActive, "no active reason ⇒ inactive chain")
+        chain.setLoudnessGain(2.0)                 // set, but inactive chain must ignore it
+        var buf: [Float] = [0.1, -0.2, 0.3, -0.4]
+        let copy = buf
+        buf.withUnsafeMutableBufferPointer { chain.process($0.baseAddress!, count: $0.count) }
+        XCTAssertEqual(buf, copy, "feature-off output must be unchanged even with loudnessGain set")
+    }
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -611,7 +745,23 @@ Carry a `loudnessGain` lock-free scalar on `VoiceChain`, applied as a pre-limite
 Run: `swift test --filter VoiceChainTests`
 Expected: compile error — `value of type 'VoiceChain' has no member 'setLoudnessGain'`.
 
-- [ ] **Step 3: Add the scalar + apply** in `VoiceChain`
+- [ ] **Step 3: Add the `loudnessActive` field, the scalar, and the apply** in `VoiceChain`
+
+First add the `loudnessActive` activation reason to `VoiceChainSettings` (memberwise-default `false` keeps every existing call site source-compatible; `.disabled` inherits the default):
+
+```swift
+    public var clarity: ClarityLevel = .off
+    /// Loudness normalization is on. An independent activation reason: when true the
+    /// chain runs (limiter + pre-limiter make-up gain) even with polish and clarity
+    /// off, so normalization works in Meeting mode. Default false → no behavior change.
+    public var loudnessActive: Bool = false
+```
+
+OR `loudnessActive` into the `active` predicate in `configure`:
+
+```swift
+        active = s.enabled || s.clarity != .off || s.loudnessActive
+```
 
 Add the stored scalar next to the stages:
 
@@ -639,18 +789,18 @@ In `process(_:count:)`, multiply by `loudnessGain` immediately before `limiter.p
             buffer[i] = x
 ```
 
-> **Important:** the chain must run when `loudnessGain != 1` even if polish + clarity are off, OR loudness normalization must be applied only while the chain is already active. **Decision:** apply only while active (limiter must run to guard the boost). When normalization is enabled but the chain would otherwise be inactive, `AudioModel` activates the limiter by treating normalization as an "active" reason (see Task 6) — but to keep this task isolated and the regression green, this task ONLY adds the scalar + multiply inside the existing `guard active` path. The "activate for loudness" wiring is Task 6.
+> **Why the field lives here (the contract):** the activation predicate (`active = … || s.loudnessActive`) and the make-up multiply must move together — the limiter MUST run to guard the boost. So normalization activation is part of `VoiceChain`, tested here (`testLoudnessActiveAloneActivatesGainAndLimiter`). `AudioModel.applyVoiceChain()` simply sets `s.loudnessActive = loudnessNormEnabled` (Task 6 Step 9). The limiter is already configured unconditionally while `active`, so a loudnessActive-only chain still has a valid ceiling. Polish/clarity stages stay bypassed (set in `init`) when their flags are off, so the loudnessActive-only path is gain → limiter only.
 
 - [ ] **Step 4: Run the full suite**
 
 Run: `swift test`
-Expected: all tests PASS (new loudness tests + existing `VoiceChainTests` + `BroadcastVoiceTests` regression — `loudnessGain` defaults to 1.0 so every existing test is unchanged).
+Expected: all tests PASS (new loudness + activation tests + existing `VoiceChainTests` + `BroadcastVoiceTests` regression — `loudnessGain` defaults to 1.0 and `loudnessActive` defaults to `false`, so every existing test is unchanged).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add Sources/Core/AudioProcessing/VoiceChain.swift Tests/NoNoiseMacTests/VoiceChainTests.swift
-git commit -m "feat(dsp): apply pre-limiter loudness make-up gain in VoiceChain"
+git commit -m "feat(dsp): pre-limiter loudness make-up gain + loudnessActive activation in VoiceChain"
 ```
 
 ---
@@ -706,44 +856,66 @@ Add `@Published` controls (after `voicePolishEnabled`, ~line 110):
 - [ ] **Step 3: Add the lock-free telemetry scalars + the `LoudnessMeter`** (near the processing modules, ~line 143)
 
 ```swift
-    private let loudnessMeter = LoudnessMeter()
+    // The loudness meter is a value-type struct mutated ONLY on the render thread
+    // (process() mutates it). It must be `var`, not `let`. It is NEVER read from the
+    // main thread — the render callback copies its getters into the LUFS snapshot
+    // scalars below; the UI timer reads only those scalars (no cross-thread struct access).
+    private var loudnessMeter = LoudnessMeter()
     // Render-thread → main lock-free scalars (atomic on arm64). Written in the
     // render callback / read by the UI timer. NOT @Published (no per-write churn).
     private var tInputLevel: Float = 0
     private var tOutputLevel: Float = 0
     private var tOutputPeak: Float = 0
-    private var tClipCount: Int32 = 0
+    // Latched best-effort clip flag (Int32): the render callback SETs it to 1 when a
+    // sample hits the threshold; the timer reads it, surfaces CLIP, then clears it.
+    // It is a latch, NOT a count — `tClipFlag &+= n` would be a non-atomic
+    // read-modify-write across threads, so we only ever STORE 0 or 1 (single atomic
+    // store on arm64). A missed/raced flag for one 40 ms tick is acceptable for a UX hint.
+    private var tClipFlag: Int32 = 0
+    // LUFS + loudness-peak snapshots: written on the render thread from the meter's
+    // getters, read by the timer. Plain scalars (atomic on arm64) — the meter struct
+    // itself never crosses threads.
+    private var tMomentaryLUFS: Float = LoudnessMeter.silenceLUFS
+    private var tIntegratedLUFS: Float = LoudnessMeter.silenceLUFS
+    private var tLoudnessSamplePeak: Float = 0
     private var currentLoudnessGain: Float = 1
 ```
 
-> **Note:** `LoudnessMeter` is a struct (value type). To mutate it from the render closure and the timer, store it as a class-held property and mutate via `withUnsafeMutablePointer`-free direct access, OR wrap loudness measurement on the DSP-output samples in the render callback (single-threaded with the render thread). Keep all `loudnessMeter` mutation on the render thread; the timer only **reads** `momentaryLUFS` / `integratedLUFS` / `samplePeak` (pure getters over scalar state — safe). If the executor finds value-type capture awkward in the closure, promote the needed accumulators following the same pattern as the other scalars; do NOT introduce a lock.
+> **Why scalar snapshots, not cross-thread struct reads:** `LoudnessMeter` is a value-type struct whose getters (`momentaryLUFS`, `integratedLUFS`, `samplePeak`) read multi-field internal state (ring sums, block accumulators). Reading those from the main-thread timer while the render thread mutates them would be a data race — NOT the safe lock-free-scalar pattern. So the render callback (single-threaded with all meter mutation) reads the getters and stores them into the `t*` scalars; the timer reads only the scalars. This keeps the blessed pattern intact (only plain 32-bit scalars cross threads, atomic on arm64) and never touches the meter object from main.
 
 - [ ] **Step 4: Write telemetry in the render callback** (the `AVAudioSourceNode` closure, after `chain.process(...)`, ~line 189)
 
-Compute post-processing output level/peak/clip over the in-place `data` buffer (scalar loop, no allocation), feed each output sample to `loudnessMeter.process(_:)`, and store the input-level RMS (replacing the per-callback `inputLevel` main-thread hop in `captureOutput` — see Step 6). Example shape (allocation-free):
+Compute post-processing output level/peak/clip over the in-place `data` buffer (scalar loop, no allocation), feed each output sample to `loudnessMeter.process(_:)`, then snapshot the meter's getters into the LUFS/peak scalars (all on the render thread). Also store the input-level RMS (replacing the per-callback `inputLevel` main-thread hop in `captureOutput` — see Step 6). Example shape (allocation-free):
 
 ```swift
                 // Telemetry (render thread → lock-free scalars). No allocation.
                 var sumSq: Float = 0, peak: Float = 0
                 let clipThreshold: Float = 0.999
-                var clips: Int32 = 0
+                var didClip = false
                 for i in 0..<count {
                     let s = data[i]
                     let m = abs(s)
                     sumSq += s * s
                     if m > peak { peak = m }
-                    if m >= clipThreshold { clips += 1 }
+                    if m >= clipThreshold { didClip = true }
                     self.loudnessMeter.process(s)   // K-weighted loudness + sample-peak
                 }
                 self.tOutputLevel = sqrtf(sumSq / Float(max(count, 1)))
                 self.tOutputPeak = peak
-                if clips > 0 { self.tClipCount &+= clips }
+                // Latched best-effort flag: single atomic store of 1 (never a counter
+                // read-modify-write). The timer reads it and clears it each tick.
+                if didClip { self.tClipFlag = 1 }
+                // Snapshot the meter getters into plain scalars (render thread only) so
+                // the UI timer never touches the meter struct cross-thread.
+                self.tMomentaryLUFS = self.loudnessMeter.momentaryLUFS
+                self.tIntegratedLUFS = self.loudnessMeter.integratedLUFS
+                self.tLoudnessSamplePeak = self.loudnessMeter.samplePeak
 
-                // Loudness make-up (read the gain computed on main; apply via chain).
-                // (chain already multiplied loudnessGain; nothing per-sample here.)
+                // Loudness make-up is applied inside chain.process (the gain is computed
+                // on main by the timer and stored via setLoudnessGain); nothing per-sample here.
 ```
 
-> The DSP-side `aiActivity` is read from `dspEngine.aiActivity` by the timer (Step 5), not here.
+> The DSP-side `aiActivity` is read from `dspEngine.aiActivity` by the timer (Step 5), not here. The LUFS snapshots are read by the timer from `tMomentaryLUFS` / `tIntegratedLUFS`, never from the meter object.
 
 - [ ] **Step 5: Add the ~25 Hz UI snapshot timer**
 
@@ -755,18 +927,21 @@ Add a `Timer` (40 ms ≈ 25 Hz) started in `init()` (after `loadSettings()`), in
     private func startMeterTimer() {
         meterTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
             guard let self = self else { return }
+            // Read ONLY the lock-free scalars (never the meter struct). Atomic on arm64.
             self.outputLevel = self.tOutputLevel
             self.outputPeak = self.tOutputPeak
-            self.isClipping = self.tClipCount > 0
-            self.tClipCount = 0                                  // clear after surfacing (latched ~per tick)
+            self.isClipping = self.tClipFlag != 0
+            self.tClipFlag = 0                                   // clear the latch after surfacing
             self.aiActivity = self.dspEngine.aiActivity
-            self.momentaryLUFS = self.loudnessMeter.momentaryLUFS
-            self.integratedLUFS = self.loudnessMeter.integratedLUFS
-            // Loudness normalization: compute a slew-limited make-up gain on main,
-            // push it to the chain as a lock-free scalar (only when enabled + active).
+            self.momentaryLUFS = self.tMomentaryLUFS
+            self.integratedLUFS = self.tIntegratedLUFS
+            // Loudness normalization: compute a slew-limited make-up gain on main from
+            // the integrated-LUFS snapshot, push it to the chain as a lock-free scalar
+            // (only when normalization is enabled). When the meter has no measurement
+            // (silence below the gate), normalizationGain holds the current gain — no pumping.
             if self.loudnessNormEnabled {
                 let g = LoudnessMeter.normalizationGain(
-                    measuredLUFS: self.integratedLUFS, targetLUFS: self.loudnessTargetLUFS,
+                    measuredLUFS: self.tIntegratedLUFS, targetLUFS: self.loudnessTargetLUFS,
                     currentGain: self.currentLoudnessGain, maxDb: 12, slewDb: 1)  // ~1 dB/tick → smooth
                 self.currentLoudnessGain = g
                 self.voiceChain.setLoudnessGain(g)
@@ -775,7 +950,7 @@ Add a `Timer` (40 ms ≈ 25 Hz) started in `init()` (after `loadSettings()`), in
     }
 ```
 
-> **Perf:** `slewDb: 1` per 40 ms tick = max ~25 dB/s — fast enough to track, slow enough to never pump. `addedLatencyMs` is set once (Step 7), not per tick.
+> **Perf:** `slewDb: 1` per 40 ms tick = max ~25 dB/s — fast enough to track, slow enough to never pump. `addedLatencyMs` is set once (Step 7), not per tick. The timer touches NO `LoudnessMeter` struct — only `t*` scalars and `dspEngine.aiActivity`.
 
 - [ ] **Step 6: Replace the per-callback `inputLevel` hop**
 
@@ -808,11 +983,23 @@ In `loadSettings()`, inside the `isApplyingPreset = true … = false` guarded re
             ? d.float(forKey: PrefKey.loudnessTarget) : -14
 ```
 
-- [ ] **Step 9: Wire `loudnessNormEnabled` into chain activation**
+- [ ] **Step 9: Wire `loudnessNormEnabled` into chain activation** (the other half of the Task 5 contract)
 
-`applyVoiceChain()` currently sets `s.enabled = s.enabled && voicePolishEnabled; s.clarity = clarityLevel`. Loudness normalization needs the **limiter** running to guard the boost. The chain is already active when polish or clarity is on. When BOTH are off but normalization is on, the chain would be inactive and the make-up gain would be ignored. Resolve by ensuring the limiter runs: the simplest correct option is to keep `VoiceChain`'s `active` gating as-is and, in `AudioModel`, only apply `loudnessGain` while the chain is active — i.e. document that **loudness normalization requires Voice Polish or Broadcast Voice on** (both are the realistic creator setup), OR add a `normalizeActive` reason to `VoiceChainSettings`/`configure`.
+The `loudnessActive` field + activation predicate already landed in `VoiceChain` (Task 5). This step is the matching `AudioModel` half: set `s.loudnessActive = loudnessNormEnabled` in `applyVoiceChain()` so enabling normalization activates the chain (limiter + make-up) even when polish and clarity are off — keeping normalization usable in Meeting mode.
 
-> **Decision (state explicitly, ask if uncertain):** v1 ties normalization activation to the chain being active for another reason is too surprising. Add a `loudnessActive: Bool` to `VoiceChainSettings` (defaulted `false`, backward-compatible memberwise init) and OR it into `active` in `configure` (so the limiter + make-up run on their own). Set `s.loudnessActive = loudnessNormEnabled` in `applyVoiceChain()`. This keeps normalization usable in Meeting mode. **This is a small `VoiceChain` change — if the executor disagrees with adding the field, surface it before coding.**
+`applyVoiceChain()` currently sets `s.enabled = s.enabled && voicePolishEnabled; s.clarity = clarityLevel`. Add one line:
+
+```swift
+    private func applyVoiceChain() {
+        var s = selectedPreset.voiceChain
+        s.enabled = s.enabled && voicePolishEnabled
+        s.clarity = clarityLevel
+        s.loudnessActive = loudnessNormEnabled   // activate the chain for normalization
+        voiceChain.configure(s)
+    }
+```
+
+> **Contract note:** the `loudnessActive` field/predicate (Task 5) and this `applyVoiceChain()` assignment move together — neither is useful without the other. The Task 5 test `testLoudnessActiveAloneActivatesGainAndLimiter` proves the `VoiceChain` half; this step wires the `AudioModel` half. Because the field already exists, Task 6 does NOT touch `VoiceChain.swift`.
 
 - [ ] **Step 10: Start/stop the timer**
 
@@ -830,7 +1017,7 @@ git add Sources/Core/AudioModel.swift
 git commit -m "feat(audio): render-thread telemetry + LUFS meter + loudness normalization wiring"
 ```
 
-> If Step 9 required the `loudnessActive` field, also `git add Sources/Core/AudioProcessing/VoiceChain.swift Tests/NoNoiseMacTests/VoiceChainTests.swift` with a test that `loudnessActive` alone activates the chain, in a separate commit `feat(dsp): activate VoiceChain for loudness normalization`.
+> Task 6 modifies ONLY `AudioModel.swift` — the `loudnessActive` field/test landed in Task 5, so there is no `VoiceChain.swift` change here.
 
 ---
 
@@ -962,14 +1149,20 @@ Every code change requires a docs pass. Update user docs, domain vocab, the arch
 ```markdown
 ## Metering & loudness
 - **Telemetry** — lock-free scalars written on the render/DSP threads and read by a
-  ~25 Hz UI timer (same atomic-scalar pattern as the suppression knobs; no locks).
+  ~25 Hz UI timer (same atomic-scalar pattern as the suppression knobs; no locks). The
+  `LoudnessMeter` struct is mutated only on the render thread and snapshotted into
+  scalars — it is never read cross-thread. The clip indicator is a latched best-effort
+  flag (set on the render thread, cleared each UI tick), not a counter.
 - **AI activity** — a smoothed 0…1 "AI working hard" signal = energy-weighted average
   per-bin suppression (`1 − wetMag/dryMag`) from the DSP blend. A UX hint, not a model
   quality metric.
-- **LUFS (`LoudnessMeter`)** — ITU-R BS.1770 K-weighted loudness. Momentary (400 ms)
-  is the live needle; integrated is gated (absolute −70 LUFS + relative −10 LU).
+- **LUFS (`LoudnessMeter`)** — real ITU-R BS.1770 K-weighted loudness (the standard's
+  published 48 kHz two-stage filter, not an approximation). Momentary (400 ms) is the
+  live needle; integrated is gated (absolute −70 LUFS + relative −10 LU) using a
+  fixed-size block ring (no unbounded history, no render-path allocation).
 - **Loudness normalization** — optional slew-limited make-up gain toward a target
-  (−14 / −16 LUFS), applied pre-limiter in the voice chain; OFF by default.
+  (−14 / −16 LUFS), applied pre-limiter in the voice chain; OFF by default. Works even
+  with polish/clarity off (the chain activates for `loudnessActive` so the limiter runs).
 - **Peak** — v1 tracks **sample-peak** + a clip flag, NOT oversampled true-peak; the
   normalization ceiling is a peak-safe limiter (~−3 dB), not certified dBTP.
 ```
@@ -979,19 +1172,32 @@ Every code change requires a docs pass. Update user docs, domain vocab, the arch
 ```markdown
 ## Metering & loudness (Tier 2)
 - **Telemetry is lock-free scalars** written render→main (the reverse of the suppression
-  knobs, same arm64 atomicity argument). The render callback writes output level/peak/clip;
-  `DeepFilterNetDSP.aiActivity` is written in the blend loop; a ~25 Hz `Timer` on `AudioModel`
-  snapshots them into `@Published` props. NEVER add locks; NEVER push per-buffer to main
-  (the old per-callback `inputLevel` dispatch was replaced by the timer snapshot).
-- **`LoudnessMeter` (Core/AudioProcessing)** owns all BS.1770 math (K-weighting biquads,
-  momentary + gated-integrated LUFS, sample-peak, and the `normalizationGain` helper) as a
-  pure, headless-tested value type — same rule as `Biquad`/`resolveOutputBin`.
+  knobs, same arm64 atomicity argument). The render callback writes output level/peak, a
+  latched clip flag, and LUFS snapshots; `DeepFilterNetDSP.aiActivity` is written in the
+  blend loop; a ~25 Hz `Timer` on `AudioModel` snapshots them into `@Published` props.
+  NEVER add locks; NEVER push per-buffer to main (the old per-callback `inputLevel`
+  dispatch was replaced by the timer snapshot).
+- **The `LoudnessMeter` struct is NEVER read cross-thread.** It is a value type mutated
+  ONLY on the render thread; the render callback copies its getters into the `tMomentaryLUFS`
+  / `tIntegratedLUFS` / `tLoudnessSamplePeak` scalars, and the UI timer reads only those
+  scalars. Only plain 32-bit scalars cross threads (the blessed pattern) — do not read the
+  meter object from main.
+- **The clip indicator is a latched best-effort flag (`Int32` 0/1), NOT a counter.** The
+  render callback STORES 1 on a clip; the timer reads it and clears it. A counter
+  (`&+=`) would be a non-atomic read-modify-write across threads — banned.
+- **`LoudnessMeter` (Core/AudioProcessing)** owns all BS.1770 math (the REAL K-weighting
+  biquads — published 48 kHz coefficients via `Biquad.setCoefficients`, NOT RBJ
+  approximations — momentary + gated-integrated LUFS, sample-peak, and the
+  `normalizationGain` helper) as a pure, headless-tested value type — same rule as
+  `Biquad`/`resolveOutputBin`. Tested at multiple frequencies.
 - **v1 is sample-peak, not true-peak** (oversampled dBTP deferred for perf). Do not relabel
-  the peak as dBTP. Integrated LUFS uses a bounded block log (no unbounded sample history).
+  the peak as dBTP. Integrated LUFS uses a **fixed-size, pre-allocated block ring** (write
+  by index, wraparound) — never an `append`-growing log; `process` stays allocation-free.
 - **Loudness normalization** is a main-computed, slew-limited scalar `loudnessGain` applied
   pre-limiter in `VoiceChain` (limiter guards the boost). Persisted: `mv.loudnessNorm`,
   `mv.loudnessTarget`. OFF by default → default output unchanged. `VoiceChain` activates for
-  `loudnessActive` even when polish/clarity are off (limiter must run).
+  `loudnessActive` even when polish/clarity are off (limiter must run); the `loudnessActive`
+  field and `AudioModel.applyVoiceChain()` move together (one contract).
 ```
 
 - [ ] **Step 4: `docs/knowledge/timeline1.md`** — append a dated changelog entry (match the existing format):
@@ -1000,14 +1206,20 @@ Every code change requires a docs pass. Update user docs, domain vocab, the arch
 ## 2026-06-15 — Metering & Loudness added
 
 Added one render-thread telemetry layer (lock-free scalars) feeding a Live HUD
-(input/output level, sample-peak + CLIP flag, "AI working hard" activity derived
-from per-bin suppression, added-latency readout) and an ITU-R BS.1770 `LoudnessMeter`
-(K-weighting → momentary + gated-integrated LUFS, sample-peak). Added optional
-loudness normalization: a slew-limited make-up gain toward −14/−16 LUFS applied
-pre-limiter in `VoiceChain` (persisted `mv.loudnessNorm` / `mv.loudnessTarget`, OFF
-by default). v1 ships sample-peak (not oversampled true-peak) per the perf mandate.
-UI: HUD in the popover, loudness panel in Settings. Replaced the per-callback
-`inputLevel` main-thread hop with a ~25 Hz timer snapshot.
+(input/output level, sample-peak + a latched CLIP flag, "AI working hard" activity
+derived from per-bin suppression, added-latency readout) and an ITU-R BS.1770
+`LoudnessMeter` (REAL K-weighting via the published 48 kHz coefficients — a new
+`Biquad.setCoefficients` direct-coefficient path — → momentary + gated-integrated
+LUFS, sample-peak; validated at multiple frequencies). Integrated LUFS uses a
+fixed-size pre-allocated block ring (no `append` on the render path). The
+`LoudnessMeter` struct is mutated only on the render thread and snapshotted into
+plain scalars; it is never read cross-thread. Added optional loudness normalization:
+a slew-limited make-up gain toward −14/−16 LUFS applied pre-limiter in `VoiceChain`
+(new `loudnessActive` activation reason so it works in Meeting mode; persisted
+`mv.loudnessNorm` / `mv.loudnessTarget`, OFF by default). v1 ships sample-peak (not
+oversampled true-peak) per the perf mandate. UI: HUD in the popover, loudness panel
+in Settings. Replaced the per-callback `inputLevel` main-thread hop with a ~25 Hz
+timer snapshot.
 ```
 
 - [ ] **Step 5: `docs/knowledge/knowledge1.md`** — append a `[DECISION]` entry (detect username via `git config user.name`):
@@ -1019,13 +1231,19 @@ UI: HUD in the popover, loudness panel in Settings. Replaced the per-callback
 without locks/allocation, and a "true-peak" meter naïvely needs ≥4× oversampling on every buffer.
 **Decision**: (1) Telemetry = plain `Float`/`Int32` scalars written render→main, snapshotted by a
 ~25 Hz timer — the suppression-knob atomic-scalar pattern, reversed; no locks, no per-buffer main hop.
-(2) v1 ships **sample-peak + a clip flag**, NOT oversampled true-peak (too heavy for an always-on
-menu-bar utility); the normalization ceiling is a peak-safe limiter labeled ~−3 dB, not certified dBTP.
-(3) AI "confidence" is a derived heuristic (energy-weighted `1 − wetMag/dryMag` from the blend), a UX
-hint only. (4) Integrated LUFS uses a bounded block log (no unbounded sample history).
-**Rule**: Render→main telemetry must be lock-free scalars snapshotted at modest UI rate; never claim
-certified true-peak without oversampling; keep all loudness math in the pure `LoudnessMeter` type.
-**Files**: `Sources/Core/AudioProcessing/LoudnessMeter.swift`, `Sources/Core/AudioProcessing/DeepFilterNetDSP.swift`, `Sources/Core/AudioProcessing/VoiceChain.swift`, `Sources/Core/AudioModel.swift`
+The `LoudnessMeter` struct is mutated ONLY on the render thread and snapshotted into scalars; it is
+NEVER read cross-thread (only plain scalars cross threads). (2) v1 ships **sample-peak + a LATCHED
+best-effort clip flag** (`Int32` 0/1, not a `&+=` counter — RMW across threads isn't atomic), NOT
+oversampled true-peak (too heavy for an always-on menu-bar utility); the normalization ceiling is a
+peak-safe limiter labeled ~−3 dB, not certified dBTP. (3) AI "confidence" is a derived heuristic
+(energy-weighted `1 − wetMag/dryMag` from the blend), a UX hint only. (4) Integrated LUFS uses a
+**fixed-size, pre-allocated block ring** written by index (wraparound) — no `append`/grow on the
+render path. (5) K-weighting uses the REAL published BS.1770 48 kHz coefficients (a new
+`Biquad.setCoefficients` direct path), validated at multiple frequencies — not RBJ approximations.
+**Rule**: Render→main telemetry must be lock-free scalars snapshotted at a modest UI rate (never read
+a mutating struct cross-thread); the render path stays allocation-free (fixed rings, never `append`);
+never claim certified true-peak without oversampling; keep all loudness math in the pure `LoudnessMeter`.
+**Files**: `Sources/Core/AudioProcessing/Biquad.swift`, `Sources/Core/AudioProcessing/LoudnessMeter.swift`, `Sources/Core/AudioProcessing/DeepFilterNetDSP.swift`, `Sources/Core/AudioProcessing/VoiceChain.swift`, `Sources/Core/AudioModel.swift`
 ```
 
 - [ ] **Step 6: Commit**
@@ -1041,7 +1259,7 @@ git commit -m "docs: document Metering & Loudness (telemetry, LUFS, normalizatio
 
 The headless suite cannot exercise the live audio path. After implementation, verify in the running app:
 
-> **Note:** Metering of the OUTPUT and the AI-activity signal only update while **Noise Cancellation is ON** (the render callback writes telemetry inside the `if isAIEnabled` branch). The input meter and LUFS of the processed stream update whenever audio flows.
+> **Canonical telemetry-update predicate (single source of truth — see Context "Telemetry update predicate"):** ALL render-side telemetry — output level, output peak, clip flag, momentary LUFS, integrated LUFS, and AI activity — updates ONLY while **Noise Cancellation is ON**, because the render callback writes it inside the `if isAIEnabled` branch (after `dsp.process` / `chain.process`). The **input meter** is the sole exception: it is written in `captureOutput` and updates whenever audio is captured, regardless of `isAIEnabled`. When AI is OFF, the LUFS/output readouts hold their last value (or read "— LUFS" / 0 after a reset) — they are NOT live. This is the same predicate used in Task 6 Step 4.
 
 1. `./install-app.sh` (or `swift run`), open the popover.
 2. Speak — confirm the **input** meter moves and the new **output** meter moves; both track your voice.
@@ -1059,9 +1277,13 @@ The headless suite cannot exercise the live audio path. After implementation, ve
 
 ## Self-Review (completed during authoring)
 
-- **Spec coverage:** Live HUD (#6) → telemetry scalars (Task 6) + AI-activity (Task 4) + HUD UI (Task 7) showing input/output level, sample-peak + CLIP, AI confidence, latency. LUFS meter + normalization (#2) → `LoudnessMeter` momentary + gated-integrated (Tasks 1–2), `normalizationGain` (Task 3), pre-limiter make-up in `VoiceChain` (Task 5), wiring + persistence (Task 6), Settings panel (Task 7). One shared telemetry layer → Task 6 owns the single scalar set + timer.
-- **Honesty calls stated:** sample-peak (not oversampled true-peak) for v1 — Context + Task 7 copy + docs; momentary (live) + gated-integrated LUFS, no short-term — Context; AI-confidence is a derived heuristic, not a model output — Context + Task 4 comment.
-- **Hard-constraint compliance:** render thread allocation-free + lock-free scalars (Context point 1–2, Tasks 4–6 perf notes); coefficient recompute on main only (`LoudnessMeter`/`VoiceChain` configured on main; gain is a scalar store); pure testable types in `Tests/NoNoiseMacTests` (Tasks 1–5); `AudioModel` verified by build + smoke (Task 6); `mv.*` persistence, no "MetalVoice"/"Ghostkwebb" in Sources, repo-relative paths only.
-- **Open decisions surfaced for the executor:** (Task 6 Step 9) adding `loudnessActive` to `VoiceChainSettings` so normalization works with polish+clarity off; (Task 7 Step 2) `MeterView` ×5 internal scale vs. a dedicated scaled meter; (Task 2 Step 3) the bounded block-log cap for the relative gate. Each is flagged inline with a stated default.
-- **Type consistency:** `LoudnessMeter` (`process`, `momentaryLUFS`, `integratedLUFS`, `samplePeak`, `reset`, `silenceLUFS`, `loudness(meanSquare:)`, `normalizationGain(...)`), `DeepFilterNetDSP.binActivity(dryMag:wetMag:)` + `aiActivity`, `VoiceChain.setLoudnessGain(_:)` + `loudnessActive`, `AudioModel` telemetry `@Published`s + `mv.loudnessNorm`/`mv.loudnessTarget`, are used consistently across tasks.
+- **Spec coverage:** Live HUD (#6) → telemetry scalars (Task 6) + AI-activity (Task 4) + HUD UI (Task 7) showing input/output level, sample-peak + CLIP, AI confidence, latency. LUFS meter + normalization (#2) → `LoudnessMeter` real BS.1770 K-weighting + momentary + gated-integrated (Tasks 1–2), `normalizationGain` (Task 3), pre-limiter make-up + `loudnessActive` activation in `VoiceChain` (Task 5), wiring + persistence (Task 6), Settings panel (Task 7). One shared telemetry layer → Task 6 owns the single scalar set + timer.
+- **Real-time safety (reviewer fix #1):** the `LoudnessMeter` struct is mutated ONLY on the render thread (`private var`, `process` mutates) and snapshotted into the `tMomentaryLUFS`/`tIntegratedLUFS`/`tLoudnessSamplePeak` scalars there; the UI timer reads ONLY those scalars — no cross-thread struct access. Integrated LUFS uses a fixed-size, pre-allocated `blockMSRing` written by index (wraparound) — never `append`/grow in `process` (Task 2 Step 3).
+- **Real BS.1770 (reviewer fix #2):** K-weighting uses the standard's published 48 kHz coefficients via the new `Biquad.setCoefficients`, validated at 1 kHz (calibration), 60 Hz (HP roll-off), and 6 kHz (shelf lift) — Task 1.
+- **Test fixes (reviewer fix #3):** `testLoudnessGainBoostsWhenActive` now uses TWO separately-configured chains (gain 2.0 vs 1.0) on identical input; added `testLoudnessActiveAloneActivatesGainAndLimiter` (loudnessActive activates with polish+clarity off) and `testDisabledChainWithLoudnessInactiveIsUnchanged` (feature-off output byte-identical). The `loudnessActive` field + predicate (Task 5) and `AudioModel.applyVoiceChain()` (Task 6 Step 9) move as one contract.
+- **Honesty calls stated:** sample-peak (not oversampled true-peak) for v1 — Context + Task 7 copy + docs; momentary (live) + gated-integrated LUFS, no short-term — Context; AI-confidence is a derived heuristic, not a model output — Context + Task 4 comment; the clip indicator is a latched best-effort flag, not a monotonic counter (reviewer fix #4).
+- **One canonical telemetry-update predicate (reviewer fix #5):** Context "Telemetry update predicate" + the matching manual-test note — render-side telemetry is live only while AI is ON; only `inputLevel` updates whenever audio is captured.
+- **Hard-constraint compliance:** render thread allocation-free + lock-free scalars (Context point 1–3, Tasks 2/4–6 perf notes); coefficient recompute on main only (`LoudnessMeter`/`VoiceChain` configured on main; gain is a scalar store); pure testable types in `Tests/NoNoiseMacTests` (Tasks 1–5); `AudioModel` verified by build + smoke (Task 6); `mv.*` persistence, no "MetalVoice"/"Ghostkwebb" in Sources, repo-relative paths only.
+- **Open decisions surfaced for the executor:** (Task 7 Step 2) `MeterView` ×5 internal scale vs. a dedicated scaled meter. The `loudnessActive` field and the block-ring cap are now decided (no longer open).
+- **Type consistency:** `LoudnessMeter` (`process`, `momentaryLUFS`, `integratedLUFS`, `samplePeak`, `reset`, `silenceLUFS`, `loudness(meanSquare:)`, `normalizationGain(...)`), `Biquad.setCoefficients(b0:b1:b2:a1:a2:)`, `DeepFilterNetDSP.binActivity(dryMag:wetMag:)` + `aiActivity`, `VoiceChain.setLoudnessGain(_:)` + `VoiceChainSettings.loudnessActive`, `AudioModel` telemetry `@Published`s + `t*` scalars + `mv.loudnessNorm`/`mv.loudnessTarget`, are used consistently across tasks.
 - **Placeholder scan:** none — every code step shows complete code or an explicit, bounded implementation note with the test that gates it.
