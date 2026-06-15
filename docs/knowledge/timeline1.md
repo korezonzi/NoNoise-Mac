@@ -2,6 +2,26 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-15 — Metering & Loudness added
+- Added an ITU-R BS.1770 `LoudnessMeter` (REAL K-weighting via the published 48 kHz
+  coefficients — a new `Biquad.setCoefficients` direct-coefficient path — → momentary +
+  gated-integrated LUFS, sample-peak; validated at 1 kHz / 60 Hz / 6 kHz). Integrated
+  LUFS uses a fixed-size pre-allocated block ring (no `append` on the render path). The
+  meter is mutated only on the render thread and snapshotted into plain scalars
+  (`tMomentaryLUFS` / `tIntegratedLUFS`); it is never read cross-thread.
+- Added a derived **AI-activity** signal (`DeepFilterNetDSP.aiActivity` = energy-weighted
+  per-bin `1 − wetMag/dryMag` from the blend, one-pole smoothed) — a UX hint, 0 when AI off.
+- Added optional **loudness normalization**: a slew-limited make-up gain toward −14/−16
+  LUFS applied pre-limiter in `VoiceChain` (new `loudnessActive` activation reason so it
+  works in Meeting mode; persisted `mv.loudnessNorm` / `mv.loudnessTarget`, OFF by default).
+- **Reused the Smart Level telemetry layer** (the existing ~25 Hz `meterTimer` /
+  `publishMeterTelemetry` and `recordOutputTelemetry`, `tOutputPeak` / `isOutputClipping`)
+  rather than adding a parallel path — extended them with output RMS level + LUFS snapshots
+  and the normalization-gain computation. v1 ships sample-peak (not oversampled true-peak)
+  per the perf mandate. UI: Live HUD in the popover (input/output meters, CLIP, AI bar,
+  momentary LUFS, latency); loudness panel in Settings (integrated LUFS + normalize toggle
+  + −14/−16 target).
+
 ### 2026-06-15 — GitHub report action added
 - Added a compact **Report** action to the menu-bar popover footer and a matching
   **Report a feature or issue** link in Settings. Both open the NoNoise Mac GitHub issue template

@@ -49,6 +49,7 @@ Everything happens **on your device**. Your audio never leaves your Mac.
 - **🔒 100% private** — fully on-device on the Neural Engine; nothing is uploaded, ever.
 - **🎛️ One-click modes** — Meeting, Podcast, Tutorial, or Custom, with strength + tone control.
 - **🎙️ Broadcast Voice** — a one-tap clarity lift (Off / Low / Medium / High) that adds studio presence and tames sibilance, so you sound clearer and more present while still sounding like *you*.
+- **📊 Live HUD & loudness** — see your input/output levels, a clip warning, an "AI working hard" signal, and added latency at a glance; an ITU-R BS.1770 LUFS meter with optional one-tap loudness normalization (−14 / −16 LUFS) keeps you consistent across calls and recordings.
 - **🛠️ Works everywhere** — any input (Built-in, USB, XLR via interface) → any app via a virtual cable.
 - **🟢 On by default** — launches actively cancelling noise; toggle from the menu bar anytime.
 - **💸 Free & open source** — MIT licensed.
