@@ -34,6 +34,23 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     /// True when the visible "NoNoise Mic" virtual device is installed (resolved by UID, so it
     /// works even though that device is INPUT-only and absent from the output-scoped scan).
     @Published public var driverInstalled: Bool = false
+
+    /// True while some app is actually capturing from "NoNoise Mic". In on-demand mode the real
+    /// mic (and the macOS orange mic indicator) is only held while this is true — matching Krisp,
+    /// which doesn't pin the mic just because the app is open.
+    @Published public var virtualMicInUse: Bool = false
+
+    // On-demand capture: when the virtual mic is installed we capture the real mic ONLY while a
+    // consumer app is using "NoNoise Mic" (observed via kAudioDevicePropertyDeviceIsRunningSomewhere).
+    // Without the driver (BlackHole fallback) there's no per-use signal, so we capture continuously.
+    private var micDeviceID: AudioObjectID = 0
+    private var isRunningSomewhereListener: AudioObjectPropertyListenerBlock?
+    private var isRunningSomewhereAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    private var onDemandMode: Bool { micDeviceID != 0 }
+    private var shouldCapture: Bool { !onDemandMode || virtualMicInUse }
     
     @Published public var isPlayingTestTone: Bool = false {
         didSet {
@@ -170,8 +187,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         checkPermissions()
         fetchInputDevices()
         fetchOutputDevices()
+        // Resolve the virtual mic up front so the first capture config is correctly gated: in
+        // on-demand mode we must NOT start the real-mic capture until an app uses "NoNoise Mic".
+        micDeviceID = deviceID(forUID: VirtualMicRouting.visibleDeviceUID)
         setupCaptureSession()
         setupPlaybackEngine()
+        resolveVirtualMicLifecycle()   // arm the in-use listener + sync initial state
         loadSettings()
     }
 
@@ -328,13 +349,28 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             }
         }
         
+        // The hidden engine (kAudioDevicePropertyIsHidden=1) is EXCLUDED from the
+        // kAudioHardwarePropertyDevices enumeration above, so the loop never sees it. Resolve it by
+        // UID translate (which DOES resolve hidden/non-enumerated devices) and inject it as the
+        // preferred route target. Without this, routing falls back to BlackHole and "NoNoise Mic"
+        // receives no audio. The engine still never enters `newDevs` (the user-facing picker).
+        let engineRouteID = deviceID(forUID: VirtualMicRouting.engineDeviceUID)
+        if engineRouteID != 0 {
+            allDevs.append(VirtualMicRouting.DeviceInfo(uid: VirtualMicRouting.engineDeviceUID,
+                                                        name: VirtualMicRouting.engineDeviceName,
+                                                        isHidden: true, hasOutput: true))
+            uidToID[VirtualMicRouting.engineDeviceUID] = engineRouteID
+        }
+
+        let routeUID = VirtualMicRouting.preferredOutputUID(from: allDevs)   // engine (by UID), else BlackHole, else nil
         DispatchQueue.main.async {
             self.outputDevices = newDevs
             // The visible "NoNoise Mic" is INPUT-only, so it is NOT in the output-scoped allDevs.
             // Detect install by translating the visible UID directly (translate resolves input-only devices too).
             self.driverInstalled = self.deviceID(forUID: VirtualMicRouting.visibleDeviceUID) != 0
-            if let uid = VirtualMicRouting.preferredOutputUID(from: allDevs) {   // engine (output-capable), else BlackHole, else nil
+            if let uid = routeUID {
                 self.selectedOutputDeviceID = uidToID[uid] ?? self.deviceID(forUID: uid)
+                if uid == VirtualMicRouting.engineDeviceUID { self.activeOutputDeviceName = VirtualMicRouting.engineDeviceName }
             }
             // else: no virtual sink → leave unset; do NOT auto-route to a physical output (that would
             // play cleaned audio aloud instead of feeding a mic). Task 8's UI surfaces "install the driver".
@@ -444,10 +480,56 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         }
         
         captureSession.commitConfiguration()
-        
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.captureSession.startRunning()
+
+        // Only hold the real mic when we actually need it (see on-demand mode). In always-on mode
+        // (no driver) this is always true, preserving the previous behavior.
+        if shouldCapture {
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.captureSession.startRunning()
+            }
         }
+    }
+
+    // MARK: - On-demand capture (mic indicator only while NoNoise Mic is in use)
+
+    /// Resolve the visible "NoNoise Mic" device and, if present, watch when an app starts/stops
+    /// using it so we can hold the real mic only then. Safe to call again (re-resolves + re-arms).
+    private func resolveVirtualMicLifecycle() {
+        if let blk = isRunningSomewhereListener, micDeviceID != 0 {
+            AudioObjectRemovePropertyListenerBlock(micDeviceID, &isRunningSomewhereAddr, DispatchQueue.main, blk)
+            isRunningSomewhereListener = nil
+        }
+        micDeviceID = deviceID(forUID: VirtualMicRouting.visibleDeviceUID)
+        guard onDemandMode else { return }   // no driver → stay always-on, no listener
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.refreshVirtualMicUsage()
+        }
+        isRunningSomewhereListener = block
+        AudioObjectAddPropertyListenerBlock(micDeviceID, &isRunningSomewhereAddr, DispatchQueue.main, block)
+        refreshVirtualMicUsage()   // sync initial state (e.g. an app already capturing at launch)
+    }
+
+    /// Read whether "NoNoise Mic" is being used right now and start/stop the real-mic capture to match.
+    private func refreshVirtualMicUsage() {
+        guard onDemandMode else { return }
+        var val: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var addr = isRunningSomewhereAddr
+        AudioObjectGetPropertyData(micDeviceID, &addr, 0, nil, &size, &val)
+        let inUse = val != 0
+        guard inUse != virtualMicInUse else { return }
+        virtualMicInUse = inUse
+        if inUse { startCapture() } else { stopCapture() }
+    }
+
+    private func startCapture() {
+        guard !captureSession.isRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { self.captureSession.startRunning() }
+    }
+
+    private func stopCapture() {
+        guard captureSession.isRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { self.captureSession.stopRunning() }
     }
 
     

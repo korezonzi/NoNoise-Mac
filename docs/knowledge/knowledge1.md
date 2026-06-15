@@ -5,6 +5,34 @@ for the must-read failure modes.
 
 ---
 
+### [GOTCHA] 2026-06-15 — A hidden device is NOT in `kAudioHardwarePropertyDevices`; route to it by UID translate
+- **Symptom (first on-device test):** "NoNoise Mic" appeared in recorders but produced **silence**. The
+  app was rendering cleaned audio to **BlackHole** instead of the NoNoise engine.
+- **Root cause:** the engine device sets `kAudioDevicePropertyIsHidden = 1` (so it stays out of every
+  app's picker). But hidden ALSO removes it from the `kAudioHardwarePropertyDevices` enumeration —
+  proven by a probe: `engine UID -> id 120, enumerated=false`, while UID-translate still resolves it.
+  `AudioModel.fetchOutputDevices` only iterated the enumeration, never saw the engine, and
+  `preferredOutputUID` fell back to BlackHole. With the round-1 silence guard, the un-fed mic ring
+  correctly returned silence — so the routing miss surfaced as "no audio" rather than garbage.
+- **Fix/Rule:** resolve the hidden engine with `kAudioHardwarePropertyTranslateUIDToDevice` (same call
+  already used for `driverInstalled`) and INJECT it into the route set; never rely on enumeration to
+  find a hidden device. The engine still never enters the user-facing picker.
+- **Files:** `Sources/Core/AudioModel.swift` (`fetchOutputDevices`). Probe lives at `/tmp/probe.swift`.
+
+### [DECISION] 2026-06-15 — On-demand capture: hold the real mic only while "NoNoise Mic" is in use
+- **Why:** users (rightly) expect the macOS orange mic indicator to be ON only when something is
+  actually listening — Krisp behaves this way. Capturing the real mic continuously from app launch
+  pins the indicator the whole time the app is open.
+- **How:** when the driver is installed, observe `kAudioDevicePropertyDeviceIsRunningSomewhere` on the
+  visible "NoNoise Mic" via `AudioObjectAddPropertyListenerBlock`. Start the `AVCaptureSession` only
+  when it flips to running; stop it when it flips off. The render engine to the hidden sink stays
+  warm (low-latency start; outputs silence while idle). Keyed to the MIC device (id 118), which the
+  app never does IO on, so the signal reflects external consumers only — not our own engine IO (120).
+- **Fallback:** without the driver (BlackHole), there's no per-use signal (the app's own output IO
+  would make BlackHole's running-state circular), so capture stays always-on.
+- **Files:** `Sources/Core/AudioModel.swift` (`resolveVirtualMicLifecycle`, `refreshVirtualMicUsage`,
+  `startCapture`/`stopCapture`, gated `setupCaptureSession`).
+
 ### [GOTCHA] 2026-06-15 — Loopback ring replays stale speech unless reads are window-guarded (privacy)
 - **Symptom (caught in Codex code review):** a modulo ring (`nn_ring_read_at` reading `storage[pos & mask]`)
   keeps returning the LAST ~1.3 s of cleaned audio after the writer stops — because the mic-read device
