@@ -119,6 +119,22 @@ struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Mouth Noise").font(.subheadline)
+                Picker("", selection: $audioModel.mouthNoiseLevel) {
+                    ForEach(MouthNoiseLevel.allCases) { level in
+                        Text(level.label).tag(level)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                Text("Tames P-pops and lip-smacks. De-plosive ducks low-band thumps; de-click masks short mouth clicks. Off = no processing added.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .nnCard()
     }
