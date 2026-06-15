@@ -24,3 +24,9 @@ jobs:
 
       - name: Build (release)
         run: swift build -c release
+
+      - name: Build NoNoise Mic driver (compile + sign check)
+        run: ./build-driver.sh
+
+      - name: Run driver host unit tests (ring + clock)
+        run: ./Driver/tests/run-tests.sh
