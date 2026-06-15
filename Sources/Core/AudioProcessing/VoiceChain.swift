@@ -132,6 +132,7 @@ public struct VoiceChainSettings: Sendable, Equatable {
     public var compMakeupDb: Float
     public var limiterCeilingDb: Float
     public var clarity: ClarityLevel = .off
+    public var mouthNoiseLevel: MouthNoiseLevel = .off
 
     public static let disabled = VoiceChainSettings(
         enabled: false, highPassHz: 80, lowShelfHz: 180, lowShelfDb: 0,
@@ -152,6 +153,9 @@ public final class VoiceChain {
     private var comp = Compressor()
     private var limiter = Limiter()
     private var deEsser = DeEsser()
+    private var dePlosive = DePlosive()
+    private var deClick = DeClick()
+    private var mouthNoise: MouthNoiseLevel = .off
     private var enabled = false
     private var clarity: ClarityLevel = .off
     private var active = false
@@ -164,20 +168,22 @@ public final class VoiceChain {
     public func configure(_ s: VoiceChainSettings) {
         let wasActive = active
         let priorClarity = clarity
+        let priorMouthNoise = mouthNoise
         enabled = s.enabled
         clarity = s.clarity
-        active = s.enabled || s.clarity != .off
+        mouthNoise = s.mouthNoiseLevel
+        active = s.enabled || s.clarity != .off || s.mouthNoiseLevel != .off
         guard active else { return }
         // Clean start when the chain becomes active (don't inherit frozen state).
-        // Switching between two *active* polish settings is intentionally bumpless.
+        // Switching between two *active* settings is intentionally bumpless EXCEPT for the
+        // stage group whose level changed — its stale envelope/gain state would ring on
+        // re-enable and color the voice, so reset ONLY that group. Independent `if` checks
+        // (not `else if`) so a simultaneous clarity+mouthNoise change resets BOTH groups.
         if !wasActive {
             reset()
-        } else if clarity != priorClarity {
-            // Clarity changed while the chain was already active (e.g. polish stays on and
-            // the user toggles Broadcast Voice Off→On, or changes level). The full reset
-            // above won't fire, so reset ONLY the clarity stages — otherwise stale
-            // presence/de-esser state would ring on re-enable and color the voice.
-            presence.reset(); deEsser.reset()
+        } else {
+            if clarity != priorClarity { presence.reset(); deEsser.reset() }
+            if mouthNoise != priorMouthNoise { dePlosive.reset(); deClick.reset() }
         }
 
         if enabled {
@@ -207,28 +213,68 @@ public final class VoiceChain {
                               sampleRate: sampleRate, enabled: false)
         }
 
-        // Limiter always runs while active — it is the safety net for the presence boost.
-        limiter.configure(ceilingDb: s.limiterCeilingDb, releaseMs: 50, sampleRate: sampleRate)
+        if mouthNoise != .off {
+            dePlosive.configure(
+                splitHz: MouthNoiseProfile.plosiveSplitHz,
+                thresholdDb: MouthNoiseProfile.plosiveThresholdDb,
+                lowRatioGuard: MouthNoiseProfile.plosiveLowRatioGuard,
+                maxReductionDb: mouthNoise.maxPlosReductionDb,
+                attackMs: MouthNoiseProfile.plosiveAttackMs,
+                releaseMs: MouthNoiseProfile.plosiveReleaseMs,
+                sampleRate: sampleRate, enabled: true)
+            deClick.configure(
+                fastAttackMs: MouthNoiseProfile.clickFastAttackMs,
+                fastReleaseMs: MouthNoiseProfile.clickFastReleaseMs,
+                slowAttackMs: MouthNoiseProfile.clickSlowAttackMs,
+                slowReleaseMs: MouthNoiseProfile.clickSlowReleaseMs,
+                clickRatio: MouthNoiseProfile.clickRatio,
+                minThresholdDb: MouthNoiseProfile.clickMinThresholdDb,
+                holdReleaseMs: MouthNoiseProfile.clickHoldReleaseMs,
+                gainFloor: mouthNoise.clickGainFloor,
+                sampleRate: sampleRate, enabled: true)
+        } else {
+            dePlosive.configure(splitHz: MouthNoiseProfile.plosiveSplitHz,
+                                thresholdDb: -42, lowRatioGuard: 0.60,
+                                maxReductionDb: 0, attackMs: 0.3, releaseMs: 25,
+                                sampleRate: sampleRate, enabled: false)
+            deClick.configure(fastAttackMs: 0.05, fastReleaseMs: 2, slowAttackMs: 50,
+                              slowReleaseMs: 200, clickRatio: 6.0, minThresholdDb: -54,
+                              holdReleaseMs: 4, gainFloor: 1.0,
+                              sampleRate: sampleRate, enabled: false)
+        }
+
+        // Limiter runs ONLY when a limiter-owning path is active (polish or clarity). The
+        // de-plosive/de-click stages are attenuation-only (they never raise level), so
+        // mouth-noise-only mode needs no limiter — running it would clamp a loud CLEAN
+        // sample above the ceiling purely because the feature is on (an identity violation).
+        if enabled || clarity != .off {
+            limiter.configure(ceilingDb: s.limiterCeilingDb, releaseMs: 50, sampleRate: sampleRate)
+        }
     }
 
     /// Clear all filter/dynamics state. Called on the inactive→active
     /// transition (and available for engine restart). Never called per buffer.
     public func reset() {
         hp.reset(); lowShelf.reset(); highShelf.reset()
-        presence.reset(); deEsser.reset(); comp.reset(); limiter.reset()
+        presence.reset(); deEsser.reset()
+        dePlosive.reset(); deClick.reset()
+        comp.reset(); limiter.reset()
     }
 
     public var isEnabled: Bool { enabled }
     public var isActive: Bool { active }
 
     /// Process `count` samples in place. No-op when inactive. Order:
-    /// HP → shelves → presence → de-esser → compressor → limiter. Polish stages
-    /// run only when `enabled`; clarity stages run only when `clarity != .off`;
-    /// the limiter always runs while active.
+    /// HP → shelves → presence → de-esser → de-plosive → de-click → compressor → limiter.
+    /// Polish stages run only when `enabled`; clarity stages only when `clarity != .off`;
+    /// mouth-noise stages only when `mouthNoise != .off`. The limiter runs only for a
+    /// limiter-owning path (polish or clarity) — the attenuation-only mouth-noise stages
+    /// never raise level, so mouth-noise-only mode is a true identity at rest for clean input.
     public func process(_ buffer: UnsafeMutablePointer<Float>, count: Int) {
         guard active else { return }
-        let doPolish = enabled
-        let doClarity = clarity != .off
+        let doPolish   = enabled
+        let doClarity  = clarity != .off
+        let doMouth    = mouthNoise != .off
         for i in 0..<count {
             var x = buffer[i]
             if doPolish {
@@ -240,10 +286,19 @@ public final class VoiceChain {
                 x = presence.process(x)
                 x = deEsser.process(x)
             }
+            if doMouth {
+                x = dePlosive.process(x)
+                x = deClick.process(x)
+            }
             if doPolish {
                 x = comp.process(x)
             }
-            x = limiter.process(x)
+            // Limiter runs ONLY for limiter-owning paths (polish/clarity). De-plosive and
+            // de-click are attenuation-only — they never raise level — so mouth-noise-only
+            // mode must NOT limit (limiting a loud clean sample would break identity at rest).
+            if doPolish || doClarity {
+                x = limiter.process(x)
+            }
             buffer[i] = x
         }
     }
