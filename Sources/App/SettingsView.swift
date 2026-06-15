@@ -102,6 +102,22 @@ struct GeneralSettingsView: View {
                 }
             }
             .toggleStyle(.switch)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Broadcast Voice").font(.subheadline)
+                Picker("", selection: $audioModel.clarityLevel) {
+                    ForEach(ClarityLevel.allCases) { level in
+                        Text(level.label).tag(level)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                Text("Adds studio presence and clarity while keeping your natural voice — sibilance is tamed automatically, so “crisp” never turns harsh.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .nnCard()
     }
