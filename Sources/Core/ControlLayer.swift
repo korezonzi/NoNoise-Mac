@@ -60,6 +60,25 @@ public enum ControlAction: Equatable, Sendable {
         default:             return nil
         }
     }
+
+    // MARK: URL emission
+
+    /// The canonical `nonoisemac://` URL string for this action, or nil for actions with no
+    /// URL representation (momentary bypass is hotkey-only). This is the SINGLE source of truth
+    /// the CLI uses to build a URL, so `from(cliVerb:)` (accepted verbs) and `from(url:)`
+    /// (delivered URLs) can never drift from what the CLI emits — see the round-trip test.
+    public var urlString: String? {
+        switch self {
+        case .toggleAI:     return "nonoisemac://toggle"
+        case .bypassToggle: return "nonoisemac://bypass"
+        case .presetNext:   return "nonoisemac://preset/next"
+        case .presetPrev:   return "nonoisemac://preset/prev"
+        case .clarityNext:  return "nonoisemac://clarity/next"
+        case .gainUp:       return "nonoisemac://gain/up"
+        case .gainDown:     return "nonoisemac://gain/down"
+        case .bypassMomentaryDown, .bypassMomentaryUp: return nil
+        }
+    }
 }
 
 // MARK: - HotkeyModifier

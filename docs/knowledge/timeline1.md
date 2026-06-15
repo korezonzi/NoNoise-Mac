@@ -21,6 +21,11 @@ Chronological log of notable changes. Newest on top.
   routes through the dispatcher and is disabled during bypass so AI can't be re-enabled against an
   active bypass.
 - Gain nudge clamps to the slider's `0.5...4.0`. `NoNoiseMacCLI` extended with `--action <verb>`.
+- Post-review hardening (Codex): the CLI's `--action` verbs now resolve through the canonical
+  `ControlAction.from(cliVerb:)` + new `ControlAction.urlString` (single source of truth,
+  round-trip tested) instead of a private verb→URL dictionary that the tests couldn't reach;
+  `HotkeyManager.register` logs non-`eventHotKeyExistsErr` failures (no silent failure) while
+  still surfacing them as conflicts; removed an unused `@State` in the Hotkeys settings view.
 
 ### 2026-06-15 — GitHub report action added
 - Added a compact **Report** action to the menu-bar popover footer and a matching

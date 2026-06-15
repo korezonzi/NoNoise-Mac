@@ -55,16 +55,13 @@ while i < args.count {
 // One-shot action mode: send the verb as a URL open and exit.
 // The running .app handles it via the nonoisemac:// URL scheme handler.
 if let verb = actionVerb {
-    let urlStrings: [String: String] = [
-        "toggle":       "nonoisemac://toggle",
-        "bypass":       "nonoisemac://bypass",
-        "preset-next":  "nonoisemac://preset/next",
-        "preset-prev":  "nonoisemac://preset/prev",
-        "clarity-next": "nonoisemac://clarity/next",
-        "gain-up":      "nonoisemac://gain/up",
-        "gain-down":    "nonoisemac://gain/down",
-    ]
-    guard let urlStr = urlStrings[verb], let url = URL(string: urlStr) else {
+    // Validate + resolve via the SAME Core parser the tests cover, then derive the URL from the
+    // action's canonical `urlString`. Using ControlAction here (instead of a local verb→URL dict)
+    // means the CLI can never accept a verb the parser rejects, nor emit a URL that doesn't
+    // round-trip back through ControlAction.from(url:) — that drift is covered by a unit test.
+    guard let action = ControlAction.from(cliVerb: verb),
+          let urlStr = action.urlString,
+          let url = URL(string: urlStr) else {
         print("Error: Unknown action verb '\(verb)'. Run --help for the list.")
         exit(1)
     }

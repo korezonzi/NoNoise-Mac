@@ -279,7 +279,6 @@ struct GeneralSettingsView: View {
 struct HotkeySettingsView: View {
     @ObservedObject var manager: HotkeyManager
     @State private var rebindingAction: HotkeyActionID?
-    @State private var isListeningForKey: Bool = false
 
     private let actionLabels: [(HotkeyActionID, String)] = [
         (.toggleAI,        "Toggle Noise Cancellation"),

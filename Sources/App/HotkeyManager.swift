@@ -105,11 +105,17 @@ public final class HotkeyManager: ObservableObject {
             registrations[action] = ref
             conflictedActions.remove(action)
             return true
-        } else {
-            // eventHotKeyExistsErr (-9878): another app owns this combo. Surface it in UI.
-            conflictedActions.insert(action)
-            return false
         }
+        // Registration failed — leave the slot unregistered and surface it in `conflictedActions`
+        // so the user can rebind (we never crash on a hotkey failure). The expected case is
+        // `eventHotKeyExistsErr` (-9878): another app already owns this combo. Any OTHER OSStatus
+        // is unexpected (e.g. a malformed key code) — log it so a non-conflict failure isn't
+        // invisible, while still surfacing it for the user.
+        if err != OSStatus(eventHotKeyExistsErr) {
+            print("HotkeyManager: RegisterEventHotKey failed for \(action.rawValue) with OSStatus \(err)")
+        }
+        conflictedActions.insert(action)
+        return false
     }
 
     private func unregister(_ action: HotkeyActionID) {

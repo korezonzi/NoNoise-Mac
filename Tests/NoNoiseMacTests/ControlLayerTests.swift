@@ -55,6 +55,32 @@ final class ControlLayerTests: XCTestCase {
     func testCLIVerbGainDown()     { XCTAssertEqual(ControlAction.from(cliVerb: "gain-down"), .gainDown) }
     func testCLIVerbUnknownNil()   { XCTAssertNil(ControlAction.from(cliVerb: "explode")) }
 
+    // MARK: - CLI verb → URL → action round-trip (locks the shipped CLI mapping to the parsers)
+
+    /// Every CLI verb must resolve to a ControlAction whose `urlString` parses back to the SAME
+    /// action via `from(url:)`. This is the guard against the CLI's emitted URL drifting from
+    /// what the URL handler accepts (the CLI builds its URL from exactly this path).
+    func testCLIVerbToURLRoundTrips() {
+        let verbs = ["toggle", "bypass", "preset-next", "preset-prev",
+                     "clarity-next", "gain-up", "gain-down"]
+        for verb in verbs {
+            guard let action = ControlAction.from(cliVerb: verb) else {
+                XCTFail("CLI verb '\(verb)' did not parse to a ControlAction"); continue
+            }
+            guard let urlStr = action.urlString, let url = URL(string: urlStr) else {
+                XCTFail("ControlAction \(action) has no urlString for verb '\(verb)'"); continue
+            }
+            XCTAssertEqual(ControlAction.from(url: url), action,
+                           "CLI verb '\(verb)' URL \(urlStr) must round-trip back to \(action)")
+        }
+    }
+
+    /// Momentary bypass is hotkey-only — it has no URL/CLI representation.
+    func testMomentaryBypassHasNoURLString() {
+        XCTAssertNil(ControlAction.bypassMomentaryDown.urlString)
+        XCTAssertNil(ControlAction.bypassMomentaryUp.urlString)
+    }
+
     // MARK: - Gain clamping constants (must match the Settings slider range 0.5...4.0)
 
     func testGainStepIsPositive() {
