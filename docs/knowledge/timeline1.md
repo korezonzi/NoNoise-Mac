@@ -2,6 +2,18 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-15 — Voice Profiles: save/recall/rename/delete named setting snapshots
+
+Added a **Voice Profiles** system: `VoiceProfile` (versioned `Codable` struct, extensible via
+optional fields), `VoiceProfileStore` (pure CRUD + JSON serialization, headless XCTest-able),
+and three new `AudioModel` methods (`saveCurrentAsProfile`, `applyProfile`, `deleteProfile`,
+`renameProfile`). Profiles are persisted as a JSON array under `mv.profiles`. The `applyProfile`
+path goes through `isApplyingPreset = true … = false` to prevent spurious `.custom` flips or
+redundant `applyVoiceChain` / `persistSettings` calls mid-apply. UI: a Profiles card in
+`GeneralSettingsView` with Save Current / Recall / Rename / Delete per row. Schema is forward-
+compatible: Metering & Loudness and Mouth-noise Finisher plans can add optional fields with no
+migration.
+
 ### 2026-06-15 — Input Volume & Smart Level plan
 - Added `docs/plans/2026-06-15-input-volume-smart-level.md`, a focused plan for hot-mic protection:
   a macOS-worded **Input Volume** control applied pre-DSP, cheap input/output sample-peak detection,

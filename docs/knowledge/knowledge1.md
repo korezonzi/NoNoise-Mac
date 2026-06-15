@@ -5,6 +5,24 @@ for the must-read failure modes.
 
 ---
 
+### [DECISION] 2026-06-15 — Voice Profiles: extensible versioned schema via optional Codable fields
+
+**Problem**: Adding new user-tunable settings (Metering & Loudness LUFS target, Mouth-noise
+de-plosive level) would break saved profiles if the schema required all fields to be present.
+**Decision**: Declare all extension-point fields as `var field: Type? = nil` in `VoiceProfile`.
+Swift's Codable synthesis silently ignores unknown JSON keys (forward-compat) and decodes missing
+optional keys as `nil` (backward-compat). A `version: Int = 1` field provides a hook for future
+breaking migrations without coupling to optional-field additions. The `VoiceProfile.decoder` is
+the single configuration point (`keyDecodingStrategy = .convertFromSnakeCase`); callers never
+build their own decoder.
+**Rule**: Any new user-tunable setting added to the app MUST be added to `VoiceProfile` as an
+optional field at the same time. Mandatory fields (non-optional) require a version bump and a
+migration in `VoiceProfileStore.decode(from:)`.
+**Files**: `Sources/Core/VoiceProfile.swift`, `Sources/Core/VoiceProfileStore.swift`,
+`Tests/NoNoiseMacTests/VoiceProfileTests.swift`.
+
+---
+
 ### [DECISION] 2026-06-15 — Broadcast Voice preserves voice identity by construction
 - **Problem:** A "crispiness"/clarity control naïvely implemented as a high-shelf boost amplifies
   sibilance, mouth noise, and residual hiss (the classic "ice-pick" voice).
