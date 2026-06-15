@@ -2,6 +2,12 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-15 — Input Volume & Smart Level plan
+- Added `docs/plans/2026-06-15-input-volume-smart-level.md`, a focused plan for hot-mic protection:
+  a macOS-worded **Input Volume** control applied pre-DSP, cheap input/output sample-peak detection,
+  and an optional **Smart Level** mode that gradually reduces Input Volume or Output Gain when the
+  voice repeatedly approaches the ceiling.
+
 ### 2026-06-15 — Broadcast Voice (clarity) added
 - Added an Off/Low/Medium/High **Broadcast Voice** control: a wide-Q presence peaking bell
   (`Biquad.setPeaking`) + a subtractive split-band `DeEsser` (`Dynamics.swift`), wired into
