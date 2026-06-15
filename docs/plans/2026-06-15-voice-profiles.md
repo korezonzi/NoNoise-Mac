@@ -10,6 +10,8 @@
 
 **Tech Stack:** Swift 5.9, SwiftUI, Swift Package Manager, XCTest (pure logic tests, headless), JSONEncoder/JSONDecoder with `.convertFromSnakeCase` / `.convertToSnakeCase`.
 
+**GitHub Issue:** #2 — https://github.com/ivalsaraj/NoNoise-Mac/issues/2
+
 **Execution location:** Run all commands from the package root — the directory that contains `Package.swift`. All paths in this plan are relative to that root.
 
 ---
