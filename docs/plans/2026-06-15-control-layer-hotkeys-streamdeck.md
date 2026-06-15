@@ -14,10 +14,30 @@
 4. Extended `NoNoiseMacCLI` with discrete action verbs (`toggle`, `bypass`, `preset-next`, etc.)
    as a secondary scripting path.
 
-**Architecture:** A new `Sources/App/ActionDispatcher.swift` coordinator sits between
-`AudioModel` (the Core state machine) and all external triggers. `AudioModel` itself gains
-**no knowledge** of hotkeys or URL schemes — all that wiring lives in App. This keeps the Core
-target free of `Carbon` / `AppKit`-specific imports and fully unit-testable.
+**Architecture:** The control layer is split across two targets so it stays unit-testable:
+
+- **`Sources/Core/ControlLayer.swift`** holds the PURE, framework-free models — the
+  `ControlAction` enum (with its `nonoisemac://` URL + CLI parsers and gain constants), the
+  `HotkeyActionID` enum, the `HotkeyBinding` model, and a pure `ControlReducer` seam that
+  describes the state transitions WITHOUT touching `AudioModel`. The test target depends only
+  on `Core` (`@testable import Core`), so these models MUST live in `Core` to be testable. They
+  import nothing beyond `Foundation` — `HotkeyBinding` stores a plain `UInt32` modifier mask, NOT
+  `NSEvent.ModifierFlags`.
+- **`Sources/App/ActionDispatcher.swift`** holds the `ActionDispatcher` coordinator that adapts
+  the pure reducer onto a live `AudioModel`. It sits between `AudioModel` (the Core state machine)
+  and all external triggers.
+- **`Sources/App/HotkeyManager.swift`** holds the Carbon / AppKit registration layer. This is the
+  ONLY place `Carbon`, `AppKit`, and `NSEvent.ModifierFlags` appear; it adapts the pure `UInt32`
+  modifier mask at the App boundary.
+
+`AudioModel` itself gains **no knowledge** of hotkeys or URL schemes — all that wiring lives in
+App. The Core target stays free of `Carbon` / `AppKit`-specific imports and fully unit-testable.
+
+> **Why not a new SwiftPM target?** The existing `Core` target is already imported by both
+> `NoNoiseMac` and the test target, and it is framework-free at the Swift level for these models
+> (it links AVFoundation/CoreML, but the new file imports only `Foundation`). Adding the pure
+> models to `Core` is the minimal change — no `Package.swift` edit is required. A separate
+> `ControlCore` library target was considered and rejected as unnecessary indirection.
 
 **Tech Stack:** Swift 5.9, SwiftUI, Carbon (`RegisterEventHotKey`), AppKit (`NSApp`,
 `NSApplicationDelegate`), Swift Package Manager, XCTest.
@@ -51,21 +71,44 @@ stream.
 | `presetNext` | Cycle `selectedPreset` forward | Wraps around |
 | `presetPrev` | Cycle `selectedPreset` backward | Wraps around |
 | `clarityNext` | Cycle `clarityLevel` forward | Wraps at `.high` → `.off` |
-| `gainUp` | `outputGainValue += 0.1` (clamped to 2.0) | |
-| `gainDown` | `outputGainValue -= 0.1` (clamped to 0.0) | |
+| `gainUp` | `outputGainValue += 0.1` (clamped to 4.0) | Matches the Settings slider range |
+| `gainDown` | `outputGainValue -= 0.1` (clamped to 0.5) | Matches the Settings slider range |
+
+> **Gain bounds:** The Settings → General "Output Gain" slider is `0.5...4.0`
+> (`SettingsView.swift` `gainCard`). The hotkey/URL gain nudge MUST clamp to the SAME range —
+> `gainMin = 0.5`, `gainMax = 4.0` — so a nudged value never lands outside what the slider can
+> represent.
 
 **Safety from a backgrounded global hotkey or URL open:** All these writes go to
-`AudioModel`'s `@Published` properties on the main thread. `DispatchQueue.main.async` is
-always used in `ActionDispatcher.dispatch(_:)`. The render callback reads plain `Float`/`Bool`
-scalars (lock-free on arm64) or checks `isAIEnabled` inside the audio thread — exactly the
-existing pattern for `outputGain` etc. No additional synchronization is needed.
+`AudioModel`'s `@Published` properties on the main thread. `ActionDispatcher` is `@MainActor`,
+so every `dispatch(_:)` runs on the main actor; the Carbon C callback (off the actor) hops via
+`Task { @MainActor in … }` before calling the dispatcher, and SwiftUI `onOpenURL` / the
+`@MainActor`-isolated `AppDelegate.application(_:open:)` are already on the main thread. The
+render callback reads plain `Float`/`Bool` scalars (lock-free on arm64) or checks `isAIEnabled`
+inside the audio thread — exactly the existing pattern for `outputGain` etc. No additional
+synchronization is needed.
 
-### A/B bypass design
+### A/B bypass design — desired vs. effective AI state
 
-"Hear raw" is a single `isBypassed: Bool` property on `ActionDispatcher` (not persisted).
-When `true`, `AudioModel.isAIEnabled` is shadowed to `false` (pass raw mic through), but the
-underlying persisted `isAIEnabled` preference is unchanged. On bypass release, AI is restored
-to whatever it was before bypass.
+The naïve approach (save `isAIEnabled` on bypass entry, restore on exit) has a state hole:
+if the user fires **toggle-AI while bypassed**, that toggle must change what AI will be AFTER
+bypass — not flip the live `AudioModel.isAIEnabled` (which is forced `false` during bypass) and
+then get clobbered on bypass exit.
+
+The fix is a single canonical **desired** AI state separate from the **effective** state pushed
+to `AudioModel`:
+
+- `desiredAIEnabled: Bool` — the user's intended AI on/off, ignoring bypass. This is the value
+  that `.toggleAI` flips, ALWAYS, whether or not bypass is active.
+- **Effective** = `desiredAIEnabled && !effectiveBypass`. This is what gets written to
+  `AudioModel.isAIEnabled`.
+- `effectiveBypass = isBypassedMomentary || isBypassedToggle`.
+
+`desiredAIEnabled` is seeded from `AudioModel.isAIEnabled` when the dispatcher is created, and is
+kept in sync whenever `.toggleAI` fires. While bypassed, `.toggleAI` updates `desiredAIEnabled`
+but keeps `AudioModel.isAIEnabled = false`; on bypass exit, the effective state is recomputed and
+`desiredAIEnabled` is restored. Bypass state is session-only (never persisted); `desiredAIEnabled`
+mirrors the persisted `isAIEnabled` preference, so the persisted value is correct after bypass exit.
 
 Two gestures:
 - **Momentary (hold):** Hotkey down → bypass on; hotkey up → bypass off. Carbon supplies
@@ -73,8 +116,8 @@ Two gestures:
   mapped to the momentary path.
 - **Toggle:** One additional `bypassToggle` action ID. Both can be hotkey-bound.
 
-`isBypassedMomentary` and `isBypassedToggle` are tracked separately; effective bypass =
-`isBypassedMomentary || isBypassedToggle`.
+`isBypassedMomentary` and `isBypassedToggle` are tracked separately so a momentary hold and a
+latched toggle can overlap without one cancelling the other; effective bypass = OR of the two.
 
 ### Global hotkey API choice: Carbon `RegisterEventHotKey`
 
@@ -164,10 +207,20 @@ exits). Since `AudioModel.init()` is asynchronous (device setup), the existing 1
   No `CFBundleURLTypes` yet.
 - `Resources/NoNoiseMac.entitlements`: exactly two keys (`audio-input`, `allow-jit`).
 - `Package.swift`: `Core` target, `NoNoiseMac` app target, `NoNoiseMacCLI` executable,
-  `NoNoiseMacTests` test target. Swift tools version 5.9, macOS 13+.
+  `NoNoiseMacTests` test target. Swift tools version 5.9, macOS 13+. The test target depends on
+  **`Core` only** — it does NOT depend on `NoNoiseMac` (the app target). Anything tested must be
+  reachable from `@testable import Core`.
 - `Tests/NoNoiseMacTests/`: headless, no CoreAudio/CoreML. `@testable import Core`.
-- `VoicePreset`: `CaseIterable`; cases can be cycled via `allCases` index arithmetic.
-- `ClarityLevel`: `CaseIterable`; same cycling pattern (added by broadcast-voice plan).
+- `VoicePreset`: `String, CaseIterable, Identifiable, Sendable` in `Sources/Core/VoicePreset.swift`;
+  cases can be cycled via `allCases` index arithmetic.
+- `ClarityLevel`: `String, CaseIterable, Identifiable, Sendable` in
+  `Sources/Core/AudioProcessing/VoiceChain.swift`; same cycling pattern (added by broadcast-voice plan).
+- `Sources/App/ContentView.swift`: `ContentView(audioModel:)`; the gear button and the footer
+  button both call `WindowManager.openSettings(model:)`. `WindowManager` (an `NSWindow` coordinator)
+  and `SettingsView(audioModel:)` both live here / in `SettingsView.swift`.
+- `Sources/App/SettingsView.swift`: `SettingsView(audioModel:)` hosts a `TabView` with two tabs
+  (`GeneralSettingsView`, `GuideView`). The "Output Gain" slider range is **`0.5...4.0`** — the
+  canonical gain range the hotkey nudge must match.
 
 ---
 
@@ -184,149 +237,245 @@ Expected: `Switched to a new branch 'feat/control-layer-hotkeys-streamdeck'`. Us
 
 ---
 
-## Task 1: `ActionDispatcher` + `ControlAction` — unit-testable core — TDD
+## Task 1: Pure control models + reducer in `Core` — unit-testable core — TDD
 
-Define the typed action enum, the A/B bypass state machine, and the dispatcher that routes
-actions to `AudioModel`. All logic that doesn't touch Carbon or AppKit lives here so it can
-be unit-tested headlessly.
+Define the typed action enum, the persisted hotkey-binding model, the action-ID enum, and a
+**pure state reducer** (`ControlReducer`) that describes every state transition WITHOUT touching
+`AudioModel`. All of this is framework-free (imports only `Foundation`) and lives in `Core` so the
+test target (`@testable import Core`) can exercise it directly. The Carbon/AppKit `HotkeyManager`
+(Task 2) and the live `ActionDispatcher` adapter (Task 3) build on top of these models.
 
 **Files:**
-- Create: `Sources/App/ActionDispatcher.swift`
-- Create: `Tests/NoNoiseMacTests/ActionDispatcherTests.swift`
+- Create: `Sources/Core/ControlLayer.swift`
+- Create: `Tests/NoNoiseMacTests/ControlLayerTests.swift`
+
+> **Why a reducer seam?** `AudioModel.init()` starts CoreAudio/AVFoundation, so it is NOT
+> headless-testable (same constraint as the existing preset/DSP tests). To test the REAL dispatch
+> logic — bypass transitions, the desired-vs-effective AI rule, hotkey→action mapping, gain
+> clamping, preset/clarity cycling, and rebind persistence — without constructing `AudioModel`, the
+> mutations are expressed as a pure function over a value-type `ControlState` snapshot. The App-side
+> `ActionDispatcher` (Task 3) is a thin adapter: read state from `AudioModel` → run the reducer →
+> write the resulting state back. No test-only branches exist in production code; the reducer is the
+> production code path, exercised directly by tests and re-used verbatim by the adapter.
 
 ### Step 1: Write the failing tests
 
-Create `Tests/NoNoiseMacTests/ActionDispatcherTests.swift`:
+Create `Tests/NoNoiseMacTests/ControlLayerTests.swift`:
 
 ```swift
 import XCTest
 @testable import Core
 
-/// Tests the pure ControlAction enum and ControlAction.from(url:) parser.
-/// ActionDispatcher itself cannot be tested headlessly (it depends on AudioModel
-/// which starts CoreAudio), but its URL parser and action enum are pure.
-final class ControlActionTests: XCTestCase {
+/// Tests the PURE control layer: ControlAction parsers, HotkeyBinding persistence,
+/// HotkeyActionID defaults, and the ControlReducer state machine (incl. A/B bypass
+/// desired-vs-effective AI state). None of this touches AudioModel, so it runs headless.
+final class ControlLayerTests: XCTestCase {
 
     // MARK: - URL parsing
 
     func testToggleURLParsed() {
-        let url = URL(string: "nonoisemac://toggle")!
-        XCTAssertEqual(ControlAction.from(url: url), .toggleAI)
+        XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://toggle")!), .toggleAI)
     }
 
     func testBypassURLParsed() {
-        let url = URL(string: "nonoisemac://bypass")!
-        XCTAssertEqual(ControlAction.from(url: url), .bypassToggle)
+        XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://bypass")!), .bypassToggle)
     }
 
     func testPresetNextURLParsed() {
-        let url = URL(string: "nonoisemac://preset/next")!
-        XCTAssertEqual(ControlAction.from(url: url), .presetNext)
+        XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://preset/next")!), .presetNext)
     }
 
     func testPresetPrevURLParsed() {
-        let url = URL(string: "nonoisemac://preset/prev")!
-        XCTAssertEqual(ControlAction.from(url: url), .presetPrev)
+        XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://preset/prev")!), .presetPrev)
     }
 
     func testClarityNextURLParsed() {
-        let url = URL(string: "nonoisemac://clarity/next")!
-        XCTAssertEqual(ControlAction.from(url: url), .clarityNext)
+        XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://clarity/next")!), .clarityNext)
     }
 
     func testGainUpURLParsed() {
-        let url = URL(string: "nonoisemac://gain/up")!
-        XCTAssertEqual(ControlAction.from(url: url), .gainUp)
+        XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://gain/up")!), .gainUp)
     }
 
     func testGainDownURLParsed() {
-        let url = URL(string: "nonoisemac://gain/down")!
-        XCTAssertEqual(ControlAction.from(url: url), .gainDown)
+        XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://gain/down")!), .gainDown)
     }
 
     func testUnknownURLReturnsNil() {
-        let url = URL(string: "nonoisemac://unknown/verb")!
-        XCTAssertNil(ControlAction.from(url: url))
+        XCTAssertNil(ControlAction.from(url: URL(string: "nonoisemac://unknown/verb")!))
     }
 
     func testWrongSchemeReturnsNil() {
-        let url = URL(string: "https://example.com/toggle")!
-        XCTAssertNil(ControlAction.from(url: url))
+        XCTAssertNil(ControlAction.from(url: URL(string: "https://example.com/toggle")!))
     }
 
     // MARK: - CLI verb parsing
 
-    func testCLIVerbToggle() {
-        XCTAssertEqual(ControlAction.from(cliVerb: "toggle"), .toggleAI)
-    }
+    func testCLIVerbToggle()       { XCTAssertEqual(ControlAction.from(cliVerb: "toggle"), .toggleAI) }
+    func testCLIVerbBypass()       { XCTAssertEqual(ControlAction.from(cliVerb: "bypass"), .bypassToggle) }
+    func testCLIVerbPresetNext()   { XCTAssertEqual(ControlAction.from(cliVerb: "preset-next"), .presetNext) }
+    func testCLIVerbPresetPrev()   { XCTAssertEqual(ControlAction.from(cliVerb: "preset-prev"), .presetPrev) }
+    func testCLIVerbClarityNext()  { XCTAssertEqual(ControlAction.from(cliVerb: "clarity-next"), .clarityNext) }
+    func testCLIVerbGainUp()       { XCTAssertEqual(ControlAction.from(cliVerb: "gain-up"), .gainUp) }
+    func testCLIVerbGainDown()     { XCTAssertEqual(ControlAction.from(cliVerb: "gain-down"), .gainDown) }
+    func testCLIVerbUnknownNil()   { XCTAssertNil(ControlAction.from(cliVerb: "explode")) }
 
-    func testCLIVerbBypass() {
-        XCTAssertEqual(ControlAction.from(cliVerb: "bypass"), .bypassToggle)
-    }
-
-    func testCLIVerbPresetNext() {
-        XCTAssertEqual(ControlAction.from(cliVerb: "preset-next"), .presetNext)
-    }
-
-    func testCLIVerbPresetPrev() {
-        XCTAssertEqual(ControlAction.from(cliVerb: "preset-prev"), .presetPrev)
-    }
-
-    func testCLIVerbClarityNext() {
-        XCTAssertEqual(ControlAction.from(cliVerb: "clarity-next"), .clarityNext)
-    }
-
-    func testCLIVerbGainUp() {
-        XCTAssertEqual(ControlAction.from(cliVerb: "gain-up"), .gainUp)
-    }
-
-    func testCLIVerbGainDown() {
-        XCTAssertEqual(ControlAction.from(cliVerb: "gain-down"), .gainDown)
-    }
-
-    func testCLIVerbUnknownReturnsNil() {
-        XCTAssertNil(ControlAction.from(cliVerb: "explode"))
-    }
-
-    // MARK: - Preset cycling (pure index math on VoicePreset.allCases)
-
-    func testPresetCycleForwardWraps() {
-        // Cycling forward from the last case should wrap to the first.
-        let cases = VoicePreset.allCases
-        guard let last = cases.last, let first = cases.first else { return XCTFail() }
-        let nextIdx = (cases.count - 1 + 1) % cases.count
-        XCTAssertEqual(cases[nextIdx], first,
-                       "cycling past last preset must wrap to first")
-        // And from the first, one step forward is the second.
-        XCTAssertEqual(cases[(0 + 1) % cases.count], cases[1])
-        _ = last // silence "unused" warning
-    }
-
-    func testPresetCycleBackwardWraps() {
-        let cases = VoicePreset.allCases
-        guard let first = cases.first else { return XCTFail() }
-        let prevIdx = (0 - 1 + cases.count) % cases.count
-        XCTAssertEqual(cases[prevIdx], cases.last!,
-                       "cycling before first preset must wrap to last")
-        _ = first
-    }
-
-    // MARK: - Clarity cycling (pure index math on ClarityLevel.allCases)
-
-    func testClarityCycleForwardWraps() {
-        let cases = ClarityLevel.allCases
-        XCTAssertEqual(cases[(cases.count - 1 + 1) % cases.count], cases[0],
-                       "cycling past .high must wrap to .off")
-    }
-
-    // MARK: - Gain clamping constants
+    // MARK: - Gain clamping constants (must match the Settings slider range 0.5...4.0)
 
     func testGainStepIsPositive() {
         XCTAssertGreaterThan(ControlAction.gainStep, 0)
     }
 
-    func testGainBoundsAreOrdered() {
-        XCTAssertLessThan(ControlAction.gainMin, ControlAction.gainMax)
+    func testGainBoundsMatchSlider() {
+        XCTAssertEqual(ControlAction.gainMin, 0.5)
+        XCTAssertEqual(ControlAction.gainMax, 4.0)
+    }
+
+    // MARK: - HotkeyBinding (pure model, plain UInt32 modifier mask)
+
+    /// A binding round-trips through its UserDefaults string representation.
+    func testHotkeyBindingRoundTrip() {
+        let b = HotkeyBinding(keyCode: 0x00, modifiers: HotkeyModifier.command.rawValue | HotkeyModifier.shift.rawValue)
+        let decoded = HotkeyBinding(encoded: b.encoded)
+        XCTAssertEqual(decoded?.keyCode, b.keyCode)
+        XCTAssertEqual(decoded?.modifiers, b.modifiers)
+    }
+
+    /// A binding with no modifiers still round-trips.
+    func testHotkeyBindingNoModifiersRoundTrip() {
+        let b = HotkeyBinding(keyCode: 0x24, modifiers: 0)
+        XCTAssertNotNil(HotkeyBinding(encoded: b.encoded))
+    }
+
+    /// Malformed encodings return nil rather than crashing.
+    func testHotkeyBindingMalformedReturnsNil() {
+        XCTAssertNil(HotkeyBinding(encoded: "not-a-binding"))
+        XCTAssertNil(HotkeyBinding(encoded: "12"))
+        XCTAssertNil(HotkeyBinding(encoded: "a:b"))
+    }
+
+    /// Default bindings cover all registered action IDs and are distinct.
+    func testDefaultBindingsExistAndAreDistinct() {
+        let defaults = HotkeyBinding.defaults
+        for id in HotkeyActionID.allCases {
+            XCTAssertNotNil(defaults[id], "missing default for \(id)")
+        }
+        let combos = defaults.values.map { "\($0.keyCode)-\($0.modifiers)" }
+        XCTAssertEqual(Set(combos).count, combos.count, "default hotkey combos must be distinct")
+    }
+
+    /// `HotkeyActionID` raw values use the `mv.hotkey.*` namespace.
+    func testHotkeyActionIDNamespace() {
+        for id in HotkeyActionID.allCases {
+            XCTAssertTrue(id.prefKey.hasPrefix("mv.hotkey."), "pref key must be mv.hotkey.*: \(id.prefKey)")
+        }
+    }
+
+    // MARK: - HotkeyActionID → ControlAction press/release mapping
+
+    /// Momentary bypass press maps to .bypassMomentaryDown; release to .bypassMomentaryUp.
+    func testBypassMomentaryPressReleaseMapping() {
+        XCTAssertEqual(HotkeyActionID.bypassMomentary.action(pressed: true), .bypassMomentaryDown)
+        XCTAssertEqual(HotkeyActionID.bypassMomentary.action(pressed: false), .bypassMomentaryUp)
+    }
+
+    /// Non-momentary actions fire only on press; release is ignored (nil).
+    func testNonMomentaryFiresOnPressOnly() {
+        XCTAssertEqual(HotkeyActionID.toggleAI.action(pressed: true), .toggleAI)
+        XCTAssertNil(HotkeyActionID.toggleAI.action(pressed: false))
+        XCTAssertEqual(HotkeyActionID.bypassToggle.action(pressed: true), .bypassToggle)
+        XCTAssertNil(HotkeyActionID.bypassToggle.action(pressed: false))
+    }
+
+    // MARK: - ControlReducer: cycling
+
+    func testPresetNextWraps() {
+        var s = ControlState(preset: VoicePreset.allCases.last!)
+        s = ControlReducer.reduce(s, .presetNext)
+        XCTAssertEqual(s.preset, VoicePreset.allCases.first!, "cycling past last preset wraps to first")
+    }
+
+    func testPresetPrevWraps() {
+        var s = ControlState(preset: VoicePreset.allCases.first!)
+        s = ControlReducer.reduce(s, .presetPrev)
+        XCTAssertEqual(s.preset, VoicePreset.allCases.last!, "cycling before first preset wraps to last")
+    }
+
+    func testClarityNextWraps() {
+        var s = ControlState(clarity: ClarityLevel.allCases.last!)
+        s = ControlReducer.reduce(s, .clarityNext)
+        XCTAssertEqual(s.clarity, ClarityLevel.allCases.first!, "cycling past last clarity wraps to first")
+    }
+
+    // MARK: - ControlReducer: gain clamping (matches the 0.5...4.0 slider)
+
+    func testGainUpClampsToMax() {
+        var s = ControlState(gain: 3.95)
+        s = ControlReducer.reduce(s, .gainUp)
+        XCTAssertEqual(s.gain, 4.0, accuracy: 0.0001, "gain up clamps to slider max 4.0")
+    }
+
+    func testGainDownClampsToMin() {
+        var s = ControlState(gain: 0.55)
+        s = ControlReducer.reduce(s, .gainDown)
+        XCTAssertEqual(s.gain, 0.5, accuracy: 0.0001, "gain down clamps to slider min 0.5")
+    }
+
+    // MARK: - ControlReducer: desired-vs-effective AI under bypass
+
+    /// toggleAI flips both desired and effective AI when NOT bypassed.
+    func testToggleAINotBypassed() {
+        var s = ControlState(desiredAI: true)
+        s = ControlReducer.reduce(s, .toggleAI)
+        XCTAssertFalse(s.desiredAI)
+        XCTAssertFalse(s.effectiveAI)
+    }
+
+    /// Sequence: bypass↓ → toggleAI → bypass↑. AI must come back OFF (the toggle won),
+    /// NOT back ON from the pre-bypass value — this is the state hole the reducer fixes.
+    func testBypassDownToggleAIBypassUpHonoursToggle() {
+        var s = ControlState(desiredAI: true)
+        s = ControlReducer.reduce(s, .bypassMomentaryDown)
+        XCTAssertFalse(s.effectiveAI, "bypass forces effective AI off")
+        XCTAssertTrue(s.desiredAI, "desired AI unchanged by bypass")
+        s = ControlReducer.reduce(s, .toggleAI)
+        XCTAssertFalse(s.desiredAI, "toggle while bypassed flips desired")
+        XCTAssertFalse(s.effectiveAI, "still bypassed, effective stays off")
+        s = ControlReducer.reduce(s, .bypassMomentaryUp)
+        XCTAssertFalse(s.effectiveAI, "on bypass exit, effective follows the NEW desired (off)")
+        XCTAssertFalse(s.desiredAI)
+    }
+
+    /// Sequence: bypass↑ from a clean ON state restores AI ON.
+    func testBypassExitRestoresDesired() {
+        var s = ControlState(desiredAI: true)
+        s = ControlReducer.reduce(s, .bypassToggle)   // bypass on
+        XCTAssertFalse(s.effectiveAI)
+        s = ControlReducer.reduce(s, .bypassToggle)   // bypass off
+        XCTAssertTrue(s.effectiveAI, "exiting bypass restores desired AI ON")
+    }
+
+    /// Momentary + toggle overlap: effective bypass is the OR; releasing momentary while
+    /// toggle is still latched keeps bypass active.
+    func testMomentaryAndToggleOverlap() {
+        var s = ControlState(desiredAI: true)
+        s = ControlReducer.reduce(s, .bypassToggle)        // toggle latched on
+        s = ControlReducer.reduce(s, .bypassMomentaryDown) // momentary also on
+        XCTAssertFalse(s.effectiveAI)
+        s = ControlReducer.reduce(s, .bypassMomentaryUp)   // momentary released
+        XCTAssertFalse(s.effectiveAI, "toggle still latched → still bypassed")
+        s = ControlReducer.reduce(s, .bypassToggle)        // toggle off
+        XCTAssertTrue(s.effectiveAI, "both released → AI restored")
+    }
+
+    /// Bypass toggle then a preset change: preset cycling works while bypassed and does
+    /// not disturb bypass.
+    func testBypassThenPresetCycle() {
+        var s = ControlState(desiredAI: true, preset: VoicePreset.allCases.first!)
+        s = ControlReducer.reduce(s, .bypassToggle)
+        s = ControlReducer.reduce(s, .presetNext)
+        XCTAssertEqual(s.preset, VoicePreset.allCases[1])
+        XCTAssertFalse(s.effectiveAI, "preset change does not lift bypass")
     }
 }
 ```
@@ -334,50 +483,49 @@ final class ControlActionTests: XCTestCase {
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-swift test --filter ControlActionTests
+swift test --filter ControlLayerTests
 ```
 
 Expected: compile error — `cannot find type 'ControlAction' in scope`.
 
-- [ ] **Step 3: Implement `ControlAction` and `ActionDispatcher`**
+- [ ] **Step 3: Implement the pure control layer in `Core`**
 
-Create `Sources/App/ActionDispatcher.swift`:
+Create `Sources/Core/ControlLayer.swift`:
 
 ```swift
 import Foundation
-import Core
 
 // MARK: - ControlAction
 
-/// Every user-facing action the control layer can fire. All actions are dispatched
-/// to AudioModel on the main thread — they are safe to call from hotkey callbacks,
-/// URL opens, or CLI verbs. The enum is in App (not Core) because the URL/CLI
-/// parsing depends on string literals that belong to the integration surface, not
-/// the audio engine.
-public enum ControlAction: Equatable {
+/// Every user-facing action the control layer can fire. Pure value type — no AppKit,
+/// no Carbon, no AudioModel. Safe to construct from hotkey callbacks, URL opens, or
+/// CLI verbs. Lives in Core so the test target can exercise the parsers + reducer.
+public enum ControlAction: Equatable, Sendable {
     case toggleAI
     case bypassMomentaryDown   // hotkey held — activate momentary bypass
     case bypassMomentaryUp     // hotkey released — deactivate momentary bypass
-    case bypassToggle          // URL/CLI path — flip persisted bypass toggle
+    case bypassToggle          // URL/CLI/latching hotkey — flip the latched bypass
     case presetNext
     case presetPrev
     case clarityNext
     case gainUp
     case gainDown
 
-    // Gain nudge and clamp values (named constants, testable).
+    // Gain nudge + clamp values. These MUST match the Settings → General "Output Gain"
+    // slider range (0.5...4.0 in SettingsView.gainCard) so a nudge never lands outside
+    // what the slider can show.
     public static let gainStep: Float = 0.1
-    public static let gainMin: Float = 0.0
-    public static let gainMax: Float = 2.0
+    public static let gainMin: Float = 0.5
+    public static let gainMax: Float = 4.0
 
-    // MARK: - URL parsing
+    // MARK: URL parsing
 
     /// Parse a `nonoisemac://` URL into a `ControlAction`. Returns nil for unknown
     /// schemes or verbs so callers can silently ignore unrecognised links.
     public static func from(url: URL) -> ControlAction? {
         guard url.scheme?.lowercased() == "nonoisemac" else { return nil }
-        // host = first path component in custom-scheme URLs; pathComponents = the rest.
-        // e.g. nonoisemac://preset/next → host="preset", path="/next"
+        // In custom-scheme URLs the verb is the host; sub-verb is the first path component.
+        // e.g. nonoisemac://preset/next → host="preset", sub="next".
         let host = url.host?.lowercased() ?? ""
         let sub = url.pathComponents.dropFirst().first?.lowercased() ?? ""
         switch (host, sub) {
@@ -392,7 +540,7 @@ public enum ControlAction: Equatable {
         }
     }
 
-    // MARK: - CLI verb parsing
+    // MARK: CLI verb parsing
 
     /// Parse a CLI verb string (e.g. "preset-next") into a `ControlAction`.
     public static func from(cliVerb verb: String) -> ControlAction? {
@@ -409,88 +557,200 @@ public enum ControlAction: Equatable {
     }
 }
 
-// MARK: - ActionDispatcher
+// MARK: - HotkeyModifier
 
-/// Routes `ControlAction`s to `AudioModel`. Owns the A/B bypass state and must
-/// be held as long as the app is alive. All methods must be called from the main
-/// thread; callers from other threads must dispatch to `DispatchQueue.main`.
-@MainActor
-public final class ActionDispatcher: ObservableObject {
+/// Modifier flags stored in a `HotkeyBinding`. Raw bit values are chosen to match the
+/// AppKit `NSEvent.ModifierFlags` device-independent bits (command 1<<20, shift 1<<17,
+/// option 1<<19, control 1<<18) so the App-boundary adapter is a no-op cast. Core itself
+/// never imports AppKit — the mask is a plain `UInt32`.
+public enum HotkeyModifier: UInt32, Sendable {
+    case capsLock = 0x010000   // 1 << 16
+    case shift    = 0x020000   // 1 << 17
+    case control  = 0x040000   // 1 << 18
+    case option   = 0x080000   // 1 << 19
+    case command  = 0x100000   // 1 << 20
+}
 
-    private weak var model: AudioModel?
+// MARK: - HotkeyActionID
 
-    // A/B bypass state — NOT persisted.
-    // Effective bypass = momentary OR toggle. We shadow isAIEnabled while bypassed
-    // (the underlying stored preference is unchanged).
-    private var isBypassedMomentary: Bool = false
-    private var isBypassedToggle: Bool = false
-    private var aiEnabledBeforeBypass: Bool = true   // saved on bypass entry
+/// The set of actions that can have a hotkey. Raw value is the UserDefaults key
+/// (under the mv.* namespace to match existing persistence conventions).
+public enum HotkeyActionID: String, CaseIterable, Sendable {
+    case toggleAI        = "mv.hotkey.toggleAI"
+    case bypassMomentary = "mv.hotkey.bypassMomentary"
+    case bypassToggle    = "mv.hotkey.bypassToggle"
+    case presetNext      = "mv.hotkey.presetNext"
+    case presetPrev      = "mv.hotkey.presetPrev"
+    case clarityNext     = "mv.hotkey.clarityNext"
+    case gainUp          = "mv.hotkey.gainUp"
+    case gainDown        = "mv.hotkey.gainDown"
 
-    @Published public private(set) var isBypassed: Bool = false
+    /// UserDefaults key for this binding.
+    public var prefKey: String { rawValue }
 
-    public init(model: AudioModel) {
-        self.model = model
+    /// Map a Carbon press/release event for this action ID to a `ControlAction`.
+    /// Only momentary bypass cares about release; all other actions fire on press only.
+    public func action(pressed: Bool) -> ControlAction? {
+        switch self {
+        case .bypassMomentary:
+            return pressed ? .bypassMomentaryDown : .bypassMomentaryUp
+        case .toggleAI:     return pressed ? .toggleAI : nil
+        case .bypassToggle: return pressed ? .bypassToggle : nil
+        case .presetNext:   return pressed ? .presetNext : nil
+        case .presetPrev:   return pressed ? .presetPrev : nil
+        case .clarityNext:  return pressed ? .clarityNext : nil
+        case .gainUp:       return pressed ? .gainUp : nil
+        case .gainDown:     return pressed ? .gainDown : nil
+        }
+    }
+}
+
+// MARK: - HotkeyBinding
+
+/// A key-code + modifier mask pair. The modifier mask is a plain `UInt32` (HotkeyModifier
+/// bits) — Core does NOT import AppKit. Stored and restored as a compact string
+/// "<keyCode>:<modifierMask>" in UserDefaults so there is no JSON/Codable overhead.
+public struct HotkeyBinding: Equatable, Sendable {
+    /// Virtual key code (Carbon kVK_* constants, e.g. kVK_ANSI_N = 0x2D).
+    public let keyCode: UInt32
+    /// Modifier mask built from `HotkeyModifier` raw bits (command|shift|option|control).
+    public let modifiers: UInt32
+
+    public init(keyCode: UInt32, modifiers: UInt32) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
     }
 
-    // MARK: - Dispatch
+    // MARK: Persistence
 
-    public func dispatch(_ action: ControlAction) {
-        guard let model = model else { return }
+    /// Compact string encoding: "<keyCode>:<modifierMask>".
+    public var encoded: String { "\(keyCode):\(modifiers)" }
+
+    /// Decode from the compact string. Returns nil if malformed.
+    public init?(encoded: String) {
+        let parts = encoded.split(separator: ":").map(String.init)
+        guard parts.count == 2,
+              let kc = UInt32(parts[0]),
+              let mod = UInt32(parts[1]) else { return nil }
+        keyCode = kc
+        modifiers = mod
+    }
+
+    // MARK: Defaults
+
+    /// Default hotkey bindings. Sane starting combos that avoid common macOS system
+    /// shortcuts. All use ⌃⌥ (Control+Option) as the base modifier. Key codes are the
+    /// Carbon kVK_ANSI_* virtual key codes (named here as raw hex so Core needs no
+    /// Carbon import; HotkeyManager validates them against kVK_* on registration).
+    ///
+    /// Written to UserDefaults on first launch; never overwritten by an update.
+    public static let defaults: [HotkeyActionID: HotkeyBinding] = {
+        let ctrlOpt = HotkeyModifier.control.rawValue | HotkeyModifier.option.rawValue
+        let ctrlOptShift = ctrlOpt | HotkeyModifier.shift.rawValue
+        return [
+            // ⌃⌥N — toggle Noise Cancellation        (kVK_ANSI_N = 0x2D)
+            .toggleAI:        HotkeyBinding(keyCode: 0x2D, modifiers: ctrlOpt),
+            // ⌃⌥B — momentary bypass (hold for raw)   (kVK_ANSI_B = 0x0B)
+            .bypassMomentary: HotkeyBinding(keyCode: 0x0B, modifiers: ctrlOpt),
+            // ⌃⌥⇧B — bypass toggle (latching)         (kVK_ANSI_B = 0x0B)
+            .bypassToggle:    HotkeyBinding(keyCode: 0x0B, modifiers: ctrlOptShift),
+            // ⌃⌥] — next preset                       (kVK_ANSI_RightBracket = 0x1E)
+            .presetNext:      HotkeyBinding(keyCode: 0x1E, modifiers: ctrlOpt),
+            // ⌃⌥[ — previous preset                   (kVK_ANSI_LeftBracket = 0x21)
+            .presetPrev:      HotkeyBinding(keyCode: 0x21, modifiers: ctrlOpt),
+            // ⌃⌥C — cycle Broadcast Voice clarity     (kVK_ANSI_C = 0x08)
+            .clarityNext:     HotkeyBinding(keyCode: 0x08, modifiers: ctrlOpt),
+            // ⌃⌥= — gain up                           (kVK_ANSI_Equal = 0x18)
+            .gainUp:          HotkeyBinding(keyCode: 0x18, modifiers: ctrlOpt),
+            // ⌃⌥- — gain down                         (kVK_ANSI_Minus = 0x1B)
+            .gainDown:        HotkeyBinding(keyCode: 0x1B, modifiers: ctrlOpt),
+        ]
+    }()
+}
+
+// MARK: - ControlState
+
+/// A pure snapshot of the control-layer-relevant state. The App-side adapter reads this
+/// from `AudioModel`, runs the reducer, and writes the result back. Bypass fields are
+/// session-only (never persisted). `desiredAI` is the user's intended AI on/off ignoring
+/// bypass; `effectiveAI` (computed) is what AudioModel.isAIEnabled is set to.
+public struct ControlState: Equatable, Sendable {
+    public var desiredAI: Bool
+    public var isBypassedMomentary: Bool
+    public var isBypassedToggle: Bool
+    public var preset: VoicePreset
+    public var clarity: ClarityLevel
+    public var gain: Float
+
+    public init(desiredAI: Bool = true,
+                isBypassedMomentary: Bool = false,
+                isBypassedToggle: Bool = false,
+                preset: VoicePreset = .meeting,
+                clarity: ClarityLevel = .off,
+                gain: Float = 1.0) {
+        self.desiredAI = desiredAI
+        self.isBypassedMomentary = isBypassedMomentary
+        self.isBypassedToggle = isBypassedToggle
+        self.preset = preset
+        self.clarity = clarity
+        self.gain = gain
+    }
+
+    /// Effective bypass = momentary OR latched toggle.
+    public var isBypassed: Bool { isBypassedMomentary || isBypassedToggle }
+
+    /// What AudioModel.isAIEnabled should be: desired AI, suppressed while bypassed.
+    public var effectiveAI: Bool { desiredAI && !isBypassed }
+}
+
+// MARK: - ControlReducer
+
+/// Pure state transitions for the control layer. The ONLY place the bypass + AI logic
+/// lives — `ActionDispatcher` (App) is a thin adapter that reads `ControlState` from
+/// `AudioModel`, calls `reduce`, and writes the result back. No AudioModel, no AppKit.
+public enum ControlReducer {
+
+    public static func reduce(_ state: ControlState, _ action: ControlAction) -> ControlState {
+        var s = state
         switch action {
         case .toggleAI:
-            model.isAIEnabled.toggle()
+            // Flip the DESIRED state regardless of bypass. effectiveAI recomputes from it.
+            s.desiredAI.toggle()
 
         case .bypassMomentaryDown:
-            if !isBypassedMomentary && !isBypassedToggle {
-                aiEnabledBeforeBypass = model.isAIEnabled
-            }
-            isBypassedMomentary = true
-            refreshBypass(model: model)
+            s.isBypassedMomentary = true
 
         case .bypassMomentaryUp:
-            isBypassedMomentary = false
-            refreshBypass(model: model)
+            s.isBypassedMomentary = false
 
         case .bypassToggle:
-            if !isBypassedMomentary && !isBypassedToggle {
-                aiEnabledBeforeBypass = model.isAIEnabled
-            }
-            isBypassedToggle.toggle()
-            refreshBypass(model: model)
+            s.isBypassedToggle.toggle()
 
         case .presetNext:
             let cases = VoicePreset.allCases
-            guard let idx = cases.firstIndex(of: model.selectedPreset) else { return }
-            model.selectedPreset = cases[(idx + 1) % cases.count]
+            if let idx = cases.firstIndex(of: s.preset) {
+                s.preset = cases[(idx + 1) % cases.count]
+            }
 
         case .presetPrev:
             let cases = VoicePreset.allCases
-            guard let idx = cases.firstIndex(of: model.selectedPreset) else { return }
-            model.selectedPreset = cases[(idx - 1 + cases.count) % cases.count]
+            if let idx = cases.firstIndex(of: s.preset) {
+                s.preset = cases[(idx - 1 + cases.count) % cases.count]
+            }
 
         case .clarityNext:
             let cases = ClarityLevel.allCases
-            guard let idx = cases.firstIndex(of: model.clarityLevel) else { return }
-            model.clarityLevel = cases[(idx + 1) % cases.count]
+            if let idx = cases.firstIndex(of: s.clarity) {
+                s.clarity = cases[(idx + 1) % cases.count]
+            }
 
         case .gainUp:
-            model.outputGainValue = min(model.outputGainValue + ControlAction.gainStep, ControlAction.gainMax)
+            s.gain = min(s.gain + ControlAction.gainStep, ControlAction.gainMax)
 
         case .gainDown:
-            model.outputGainValue = max(model.outputGainValue - ControlAction.gainStep, ControlAction.gainMin)
+            s.gain = max(s.gain - ControlAction.gainStep, ControlAction.gainMin)
         }
-    }
-
-    // MARK: - A/B bypass helpers
-
-    private func refreshBypass(model: AudioModel) {
-        let nowBypassed = isBypassedMomentary || isBypassedToggle
-        if nowBypassed {
-            model.isAIEnabled = false
-        } else {
-            model.isAIEnabled = aiEnabledBeforeBypass
-        }
-        isBypassed = nowBypassed
+        return s
     }
 }
 ```
@@ -498,192 +758,149 @@ public final class ActionDispatcher: ObservableObject {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-swift test --filter ControlActionTests
+swift test --filter ControlLayerTests
 ```
 
-Expected: all tests PASS. Note: `ActionDispatcher` itself is in the `App` target, which is
-not imported by the test target. Only `ControlAction` (which includes the pure URL and CLI
-parsers and the gain constants) is tested headlessly — that is intentional and consistent
-with how `AudioModel` tests work in this codebase.
+Expected: all tests PASS. These models + the reducer are the REAL dispatch logic — the App-side
+`ActionDispatcher` (Task 3) re-uses `ControlReducer.reduce` verbatim, so this is not a test-only
+shadow implementation.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Sources/App/ActionDispatcher.swift Tests/NoNoiseMacTests/ActionDispatcherTests.swift
-git commit -m "feat(control): add ControlAction enum + ActionDispatcher (URL/CLI parsers, A/B bypass)"
+git add Sources/Core/ControlLayer.swift Tests/NoNoiseMacTests/ControlLayerTests.swift
+git commit -m "feat(control): add pure ControlAction/HotkeyBinding/ControlReducer to Core (testable)"
 ```
 
 ---
 
-## Task 2: `HotkeyBinding` + `HotkeyManager` — Carbon registration — TDD
+## Task 2: `ActionDispatcher` adapter + Carbon `HotkeyManager` — App layer
 
-Define the persisted hotkey-binding model (key + modifiers per action) and the Carbon
-registration layer. The binding model is pure (unit-testable); the Carbon registration is
-app-only.
+Build the App-side layer on top of the pure Core models from Task 1: the `ActionDispatcher`
+(adapts `ControlReducer` onto a live `AudioModel`) and the Carbon `HotkeyManager` (registers
+system-wide hotkeys and routes them through the dispatcher). Both are `@MainActor` and conform to
+`ObservableObject` because the UI observes them (`@ObservedObject` / `@StateObject`).
+
+No new XCTest here — the real dispatch logic is already tested via `ControlReducer` in Task 1
+(`ActionDispatcher` is a thin adapter that cannot be constructed headlessly because it depends on
+`AudioModel`, which starts CoreAudio). Verified by build.
 
 **Files:**
+- Create: `Sources/App/ActionDispatcher.swift`
 - Create: `Sources/App/HotkeyManager.swift`
-- Modify: `Tests/NoNoiseMacTests/ActionDispatcherTests.swift` (add binding tests)
 
-### Step 1: Write the failing tests — add inside `ControlActionTests`
+### Step 1: Implement the `ActionDispatcher` adapter
+
+Create `Sources/App/ActionDispatcher.swift`:
 
 ```swift
-    // MARK: - HotkeyBinding (pure model)
+import Foundation
+import Combine   // ObservableObject / @Published
+import Core
 
-    /// A binding round-trips through its UserDefaults representation (rawValue).
-    func testHotkeyBindingRoundTrip() {
-        let b = HotkeyBinding(keyCode: 0x00, modifiers: [.command, .shift])
-        let encoded = b.encoded
-        let decoded = HotkeyBinding(encoded: encoded)
-        XCTAssertEqual(decoded?.keyCode, b.keyCode)
-        XCTAssertEqual(decoded?.modifiers, b.modifiers)
+/// Adapts the pure `ControlReducer` onto a live `AudioModel`. Owns the session-only A/B
+/// bypass state and the canonical `desiredAI` flag. Must be held for the app's lifetime.
+///
+/// All mutations run on the main thread (`@MainActor`); callers from other threads MUST hop
+/// to the main actor first. AudioModel's `@Published` knobs are written from main exactly
+/// like the existing UI bindings (the render thread reads lock-free arm64 scalars — see
+/// AGENTS.md "Real-time audio rules").
+@MainActor
+public final class ActionDispatcher: ObservableObject {
+
+    private weak var model: AudioModel?
+
+    /// Pure state snapshot. Seeded from AudioModel on init; the reducer is the single source
+    /// of bypass + desired-AI truth. `gain`/`preset`/`clarity` are re-synced from the model on
+    /// every dispatch so external changes (UI sliders, presets) are not clobbered.
+    private var state: ControlState
+
+    /// Mirrors `state.isBypassed` for the SwiftUI bypass banner (Task 6).
+    @Published public private(set) var isBypassed: Bool = false
+
+    public init(model: AudioModel) {
+        self.model = model
+        // Seed desired-AI from the model's current (persisted) value.
+        self.state = ControlState(desiredAI: model.isAIEnabled,
+                                  preset: model.selectedPreset,
+                                  clarity: model.clarityLevel,
+                                  gain: model.outputGainValue)
     }
 
-    /// A binding with no modifiers still round-trips.
-    func testHotkeyBindingNoModifiersRoundTrip() {
-        let b = HotkeyBinding(keyCode: 0x24, modifiers: [])
-        XCTAssertNotNil(HotkeyBinding(encoded: b.encoded))
-    }
+    // MARK: - Dispatch
 
-    /// Default bindings cover all registered action IDs and are distinct.
-    func testDefaultBindingsExistAndAreDistinct() {
-        let defaults = HotkeyBinding.defaults
-        // Each registered action must have a default.
-        let registered: [HotkeyActionID] = [.toggleAI, .bypassMomentary, .bypassToggle,
-                                             .presetNext, .presetPrev, .clarityNext,
-                                             .gainUp, .gainDown]
-        for id in registered {
-            XCTAssertNotNil(defaults[id], "missing default for \(id)")
+    /// Run one action through the pure reducer and push the resulting state to AudioModel.
+    public func dispatch(_ action: ControlAction) {
+        guard let model = model else { return }
+
+        // Re-sync the value-knob fields from the model so concurrent UI edits aren't lost.
+        // `desiredAI` and the bypass flags are owned by the reducer and intentionally NOT
+        // re-read here — while bypassed, model.isAIEnabled is forced false and would corrupt
+        // `desiredAI` if read back.
+        state.preset = model.selectedPreset
+        state.clarity = model.clarityLevel
+        state.gain = model.outputGainValue
+        if !state.isBypassed {
+            // When not bypassed, model.isAIEnabled IS the desired value — keep them in sync
+            // so a UI toggle is reflected before a hotkey toggle.
+            state.desiredAI = model.isAIEnabled
         }
-        // All defaults must be distinct combos (no collision at startup).
-        let combos = defaults.values.map { "\($0.keyCode)-\($0.modifiers.rawValue)" }
-        XCTAssertEqual(Set(combos).count, combos.count, "default hotkey combos must be distinct")
-    }
 
-    /// `HotkeyActionID` raw values use the `mv.hotkey.*` namespace.
-    func testHotkeyActionIDNamespace() {
-        for id in HotkeyActionID.allCases {
-            XCTAssertTrue(id.prefKey.hasPrefix("mv.hotkey."),
-                          "pref key must use mv.hotkey.* namespace: \(id.prefKey)")
-        }
+        state = ControlReducer.reduce(state, action)
+
+        // Push the reduced state back onto the model.
+        model.selectedPreset = state.preset
+        model.clarityLevel = state.clarity
+        model.outputGainValue = state.gain
+        model.isAIEnabled = state.effectiveAI   // desiredAI suppressed while bypassed
+
+        isBypassed = state.isBypassed
     }
+}
 ```
 
-- [ ] **Step 2: Run to verify failure**
-
-```bash
-swift test --filter ControlActionTests
-```
-
-Expected: compile error — `cannot find type 'HotkeyBinding' in scope`.
-
-- [ ] **Step 3: Implement `HotkeyManager.swift`**
+### Step 2: Implement the Carbon `HotkeyManager`
 
 Create `Sources/App/HotkeyManager.swift`:
 
 ```swift
 import Foundation
-import Carbon.HIToolbox
+import AppKit            // NSEvent.ModifierFlags (modifier-mask adapter)
+import Combine           // ObservableObject / @Published (UI observes conflictedActions)
+import Carbon.HIToolbox  // RegisterEventHotKey, kVK_*, EventHotKeyID
+import Core              // HotkeyActionID, HotkeyBinding, HotkeyModifier, ControlAction
 
-// MARK: - HotkeyActionID
-
-/// The set of actions that can have a hotkey. Raw value is the UserDefaults key
-/// (under the mv.* namespace to match existing persistence conventions).
-public enum HotkeyActionID: String, CaseIterable {
-    case toggleAI       = "mv.hotkey.toggleAI"
-    case bypassMomentary = "mv.hotkey.bypassMomentary"
-    case bypassToggle   = "mv.hotkey.bypassToggle"
-    case presetNext     = "mv.hotkey.presetNext"
-    case presetPrev     = "mv.hotkey.presetPrev"
-    case clarityNext    = "mv.hotkey.clarityNext"
-    case gainUp         = "mv.hotkey.gainUp"
-    case gainDown       = "mv.hotkey.gainDown"
-
-    /// UserDefaults key for this binding.
-    public var prefKey: String { rawValue }
-}
-
-// MARK: - HotkeyBinding
-
-/// A key-code + modifier mask pair. Stored and restored as a compact string
-/// "<keyCode>:<modifierRawValue>" in UserDefaults so no JSON/Codable overhead.
-public struct HotkeyBinding: Equatable {
-    /// Virtual key code (Carbon kVK_* constants, e.g. kVK_ANSI_N = 0x2D).
-    public let keyCode: UInt32
-    /// NSEvent-style modifier flags subset: command (1<<20), shift (1<<17), option (1<<19),
-    /// control (1<<18). Stored as a raw UInt32.
-    public let modifiers: NSEventModifierMask
-
-    public init(keyCode: UInt32, modifiers: NSEventModifierMask) {
-        self.keyCode = keyCode
-        self.modifiers = modifiers
-    }
-
-    // MARK: Persistence
-
-    /// Compact string encoding: "<keyCode>:<modifiersRawValue>".
-    public var encoded: String { "\(keyCode):\(modifiers.rawValue)" }
-
-    /// Decode from the compact string. Returns nil if malformed.
-    public init?(encoded: String) {
-        let parts = encoded.split(separator: ":").map(String.init)
-        guard parts.count == 2,
-              let kc = UInt32(parts[0]),
-              let mod = UInt(parts[1]) else { return nil }
-        keyCode = kc
-        modifiers = NSEventModifierMask(rawValue: mod)
-    }
-
-    // MARK: Defaults
-
-    /// Default hotkey bindings. Sane starting combos that avoid conflicts with common
-    /// macOS system shortcuts. All use ⌃⌥ (Control+Option) as the base modifier, which
-    /// is less likely to collide with app shortcuts than ⌘ combos.
-    ///
-    /// Users can rebind in Settings. These are only the startup defaults; they are written
-    /// to UserDefaults on first launch and never overwritten by an update.
-    public static let defaults: [HotkeyActionID: HotkeyBinding] = [
-        // ⌃⌥N — toggle Noise Cancellation
-        .toggleAI:        HotkeyBinding(keyCode: UInt32(kVK_ANSI_N), modifiers: [.control, .option]),
-        // ⌃⌥B — momentary bypass (hold down for raw; release restores AI)
-        .bypassMomentary: HotkeyBinding(keyCode: UInt32(kVK_ANSI_B), modifiers: [.control, .option]),
-        // ⌃⌥⇧B — bypass toggle (latching)
-        .bypassToggle:    HotkeyBinding(keyCode: UInt32(kVK_ANSI_B), modifiers: [.control, .option, .shift]),
-        // ⌃⌥] — next preset
-        .presetNext:      HotkeyBinding(keyCode: UInt32(kVK_ANSI_RightBracket), modifiers: [.control, .option]),
-        // ⌃⌥[ — previous preset
-        .presetPrev:      HotkeyBinding(keyCode: UInt32(kVK_ANSI_LeftBracket), modifiers: [.control, .option]),
-        // ⌃⌥C — cycle Broadcast Voice clarity level
-        .clarityNext:     HotkeyBinding(keyCode: UInt32(kVK_ANSI_C), modifiers: [.control, .option]),
-        // ⌃⌥= — gain up
-        .gainUp:          HotkeyBinding(keyCode: UInt32(kVK_ANSI_Equal), modifiers: [.control, .option]),
-        // ⌃⌥- — gain down
-        .gainDown:        HotkeyBinding(keyCode: UInt32(kVK_ANSI_Minus), modifiers: [.control, .option]),
-    ]
-}
-
-// Alias so the test target can use the AppKit type by name without importing AppKit.
-typealias NSEventModifierMask = NSEvent.ModifierFlags
-
-// MARK: - HotkeyManager
-
-/// Registers and manages system-wide Carbon hotkeys. Must be created and retained
-/// for the lifetime of the app. All methods run on the main thread.
+/// Registers and manages system-wide Carbon hotkeys. Must be created and retained for the
+/// lifetime of the app. All methods run on the main thread (`@MainActor`).
 ///
 /// **Why Carbon `RegisterEventHotKey` and not `NSEvent.addGlobalMonitorForEvents`:**
 /// Carbon hotkeys work under the hardened runtime with the existing two entitlements
-/// (audio-input + allow-jit) and require NO additional permissions. NSEvent global
-/// monitors require Accessibility permission (a user-visible prompt) — which we
-/// deliberately avoid to keep the entitlement surface minimal.
+/// (audio-input + allow-jit) and require NO additional permissions. NSEvent global monitors
+/// require Accessibility permission (a user-visible prompt) — deliberately avoided to keep the
+/// entitlement surface minimal (see AGENTS.md "Entitlements & signing").
 @MainActor
-public final class HotkeyManager {
+public final class HotkeyManager: ObservableObject {
 
-    private var dispatcher: ActionDispatcher
+    private let dispatcher: ActionDispatcher
     private var registrations: [HotkeyActionID: EventHotKeyRef] = [:]
     private var eventHandler: EventHandlerRef?
+
+    /// Deterministic EventHotKeyID.id per action — its position in `HotkeyActionID.allCases`
+    /// plus 1 (never 0). NOT a hash: hashValue is randomized per process and would make the
+    /// fired ID un-matchable back to its action.
+    private static let actionOrder: [HotkeyActionID] = HotkeyActionID.allCases
+    private func hotKeyNumericID(for action: HotkeyActionID) -> UInt32 {
+        UInt32((Self.actionOrder.firstIndex(of: action) ?? 0) + 1)
+    }
+    private func action(forNumericID id: UInt32) -> HotkeyActionID? {
+        let idx = Int(id) - 1
+        guard idx >= 0, idx < Self.actionOrder.count else { return nil }
+        return Self.actionOrder[idx]
+    }
+
     /// Current active bindings (loaded from UserDefaults or defaults).
-    private(set) var bindings: [HotkeyActionID: HotkeyBinding] = [:]
-    /// Action IDs whose preferred binding collided with another app.
+    @Published public private(set) var bindings: [HotkeyActionID: HotkeyBinding] = [:]
+    /// Action IDs whose preferred binding collided with another app (eventHotKeyExistsErr).
     @Published public private(set) var conflictedActions: Set<HotkeyActionID> = []
 
     public init(dispatcher: ActionDispatcher) {
@@ -694,14 +911,16 @@ public final class HotkeyManager {
     }
 
     deinit {
-        unregisterAll()
+        // deinit is nonisolated; tear down Carbon registrations directly (no actor hop needed —
+        // UnregisterEventHotKey/RemoveEventHandler are thread-safe C calls).
+        for (_, ref) in registrations { UnregisterEventHotKey(ref) }
         if let h = eventHandler { RemoveEventHandler(h) }
     }
 
     // MARK: - Public API
 
-    /// Update the binding for a single action: unregisters the old combo, persists
-    /// the new one, and re-registers. Returns true if registration succeeded.
+    /// Update the binding for a single action: unregisters the old combo, persists the new
+    /// one, and re-registers. Returns true if registration succeeded.
     @discardableResult
     public func rebind(action: HotkeyActionID, to binding: HotkeyBinding) -> Bool {
         unregister(action)
@@ -715,15 +934,12 @@ public final class HotkeyManager {
     private func loadBindings() {
         let d = UserDefaults.standard
         for id in HotkeyActionID.allCases {
-            if let raw = d.string(forKey: id.prefKey),
-               let b = HotkeyBinding(encoded: raw) {
+            if let raw = d.string(forKey: id.prefKey), let b = HotkeyBinding(encoded: raw) {
                 bindings[id] = b
-            } else {
+            } else if let def = HotkeyBinding.defaults[id] {
                 // First launch: write and use the default.
-                if let def = HotkeyBinding.defaults[id] {
-                    bindings[id] = def
-                    d.set(def.encoded, forKey: id.prefKey)
-                }
+                bindings[id] = def
+                d.set(def.encoded, forKey: id.prefKey)
             }
         }
     }
@@ -741,17 +957,16 @@ public final class HotkeyManager {
     }
 
     private func registerAll() {
-        for (id, binding) in bindings {
-            register(action: id, binding: binding)
-        }
+        for (id, binding) in bindings { register(action: id, binding: binding) }
     }
 
     @discardableResult
     private func register(action: HotkeyActionID, binding: HotkeyBinding) -> Bool {
-        let carbonMods = carbonModifiers(from: binding.modifiers)
-        var hotKeyID = EventHotKeyID(signature: fourCC("NoNM"), id: UInt32(action.rawValue.hashValue & 0x7FFFFFFF))
+        let carbonMods = Self.carbonModifiers(from: binding.modifiers)
+        let hotKeyID = EventHotKeyID(signature: Self.fourCC("NoNM"), id: hotKeyNumericID(for: action))
         var ref: EventHotKeyRef?
-        let err = RegisterEventHotKey(binding.keyCode, carbonMods, hotKeyID, GetApplicationEventTarget(), 0, &ref)
+        let err = RegisterEventHotKey(binding.keyCode, carbonMods, hotKeyID,
+                                      GetApplicationEventTarget(), 0, &ref)
         if err == noErr, let ref = ref {
             registrations[action] = ref
             conflictedActions.remove(action)
@@ -764,58 +979,34 @@ public final class HotkeyManager {
     }
 
     private func unregister(_ action: HotkeyActionID) {
-        if let ref = registrations.removeValue(forKey: action) {
-            UnregisterEventHotKey(ref)
-        }
-    }
-
-    private func unregisterAll() {
-        for (_, ref) in registrations { UnregisterEventHotKey(ref) }
-        registrations.removeAll()
+        if let ref = registrations.removeValue(forKey: action) { UnregisterEventHotKey(ref) }
     }
 
     // MARK: - Event dispatch
 
-    /// Called by the Carbon event handler (C shim below). Identifies the action by
-    /// matching the fired EventHotKeyID back to a registered registration slot.
-    fileprivate func handleHotKeyEvent(_ event: EventRef, pressed: Bool) {
-        var hotkeyID = EventHotKeyID()
-        GetEventParameter(event, EventParamName(kEventParamDirectObject),
-                          EventParamType(typeEventHotKeyID), nil,
-                          MemoryLayout<EventHotKeyID>.size, nil, &hotkeyID)
-        // Find which action owns this ID by matching signature + numeric ID.
-        for (actionID, binding) in bindings {
-            let expected = UInt32(actionID.rawValue.hashValue & 0x7FFFFFFF)
-            guard hotkeyID.id == expected else { continue }
-            if pressed {
-                switch actionID {
-                case .bypassMomentary:
-                    dispatcher.dispatch(.bypassMomentaryDown)
-                default:
-                    dispatcher.dispatch(ControlAction.from(cliVerb: actionID.cliVerb) ?? .toggleAI)
-                }
-            } else {
-                // Key released — only momentary bypass cares.
-                if actionID == .bypassMomentary {
-                    dispatcher.dispatch(.bypassMomentaryUp)
-                }
-            }
-            return
+    /// Called (on the main thread) by the Carbon C shim. Matches the fired EventHotKeyID back
+    /// to its action via the deterministic numeric ID, then dispatches the mapped ControlAction.
+    fileprivate func handleHotKeyEvent(numericID: UInt32, pressed: Bool) {
+        guard let actionID = action(forNumericID: numericID) else { return }
+        if let controlAction = actionID.action(pressed: pressed) {
+            dispatcher.dispatch(controlAction)
         }
     }
 
-    // MARK: - Helpers
+    // MARK: - Helpers (modifier-mask adapter: Core UInt32 → Carbon mask)
 
-    private func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
-        var mask: UInt32 = 0
-        if flags.contains(.command) { mask |= UInt32(cmdKey) }
-        if flags.contains(.shift)   { mask |= UInt32(shiftKey) }
-        if flags.contains(.option)  { mask |= UInt32(optionKey) }
-        if flags.contains(.control) { mask |= UInt32(controlKey) }
-        return mask
+    /// Adapt the Core `HotkeyModifier` mask (NSEvent device-independent bits) to a Carbon
+    /// modifier mask. This is the ONLY place the two representations meet.
+    private static func carbonModifiers(from mask: UInt32) -> UInt32 {
+        var out: UInt32 = 0
+        if mask & HotkeyModifier.command.rawValue != 0 { out |= UInt32(cmdKey) }
+        if mask & HotkeyModifier.shift.rawValue   != 0 { out |= UInt32(shiftKey) }
+        if mask & HotkeyModifier.option.rawValue  != 0 { out |= UInt32(optionKey) }
+        if mask & HotkeyModifier.control.rawValue != 0 { out |= UInt32(controlKey) }
+        return out
     }
 
-    private func fourCC(_ s: String) -> OSType {
+    private static func fourCC(_ s: String) -> OSType {
         let bytes = Array(s.utf8)
         guard bytes.count >= 4 else { return 0 }
         return OSType(bytes[0]) << 24 | OSType(bytes[1]) << 16 | OSType(bytes[2]) << 8 | OSType(bytes[3])
@@ -824,65 +1015,104 @@ public final class HotkeyManager {
 
 // MARK: - Carbon event handler (C-compatible function)
 
-/// Top-level C callback required by `InstallEventHandler`. Bridges to the Swift
-/// `HotkeyManager.handleHotKeyEvent` method via the stored `userData` pointer.
+/// Top-level C callback required by `InstallEventHandler`. Reads the fired EventHotKeyID off
+/// the Carbon event, then hops to the main actor before touching `HotkeyManager` (which is
+/// `@MainActor`). Carbon delivers this on the main run loop in a menu-bar app, but the explicit
+/// `Task { @MainActor }` hop satisfies Swift concurrency isolation and is correct even if the
+/// thread assumption ever changes.
 private func hotkeyEventHandler(
     _ nextHandler: EventHandlerCallRef?,
     _ event: EventRef?,
     _ userData: UnsafeMutableRawPointer?
 ) -> OSStatus {
     guard let event = event, let userData = userData else { return OSStatus(eventNotHandledErr) }
-    let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
     let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
-    // The handler is always called on the main thread by Carbon (menu-bar app context).
-    manager.handleHotKeyEvent(event, pressed: pressed)
-    return noErr
-}
 
-// MARK: - HotkeyActionID CLI verb mapping
+    // Extract the EventHotKeyID synchronously (the EventRef is only valid for this call).
+    var hotkeyID = EventHotKeyID()
+    let status = GetEventParameter(event, EventParamName(kEventParamDirectObject),
+                                   EventParamType(typeEventHotKeyID), nil,
+                                   MemoryLayout<EventHotKeyID>.size, nil, &hotkeyID)
+    guard status == noErr else { return OSStatus(eventNotHandledErr) }
+    let numericID = hotkeyID.id
 
-private extension HotkeyActionID {
-    var cliVerb: String {
-        switch self {
-        case .toggleAI:        return "toggle"
-        case .bypassMomentary: return "bypass"  // momentary; mapped internally
-        case .bypassToggle:    return "bypass"
-        case .presetNext:      return "preset-next"
-        case .presetPrev:      return "preset-prev"
-        case .clarityNext:     return "clarity-next"
-        case .gainUp:          return "gain-up"
-        case .gainDown:        return "gain-down"
-        }
+    // Hop to the main actor; HotkeyManager + ActionDispatcher are @MainActor.
+    let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
+    Task { @MainActor in
+        manager.handleHotKeyEvent(numericID: numericID, pressed: pressed)
     }
+    return noErr
 }
 ```
 
-- [ ] **Step 4: Run the full test suite**
+> **Why these fixes vs. the reviewer's findings:**
+> - `ObservableObject` conformance is now explicit on BOTH `ActionDispatcher` and
+>   `HotkeyManager`, so `@ObservedObject` / `@StateObject` and `@Published` compile.
+> - `import AppKit` + `import Combine` + `import Carbon.HIToolbox` are all present; the Core
+>   models supply `HotkeyActionID` / `HotkeyBinding` / `HotkeyModifier` / `ControlAction`.
+> - The C Carbon callback no longer calls a `@MainActor` method synchronously — it extracts the
+>   `EventHotKeyID` (valid only during the callback) and then hops via `Task { @MainActor in … }`.
+> - `EventHotKeyID.id` is DETERMINISTIC (`allCases` index + 1), not `rawValue.hashValue` — so the
+>   fired ID reliably matches back to its action across process launches.
+
+- [ ] **Step 3: Build**
+
+```bash
+swift build
+```
+
+Expected: build succeeds. The full test suite is unchanged from Task 1 (no new headless-testable
+surface here):
 
 ```bash
 swift test
 ```
 
-Expected: all tests PASS (existing suite + new `ControlActionTests` binding tests).
+Expected: all tests PASS (existing suite + Task 1 `ControlLayerTests`).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add Sources/App/HotkeyManager.swift Tests/NoNoiseMacTests/ActionDispatcherTests.swift
-git commit -m "feat(hotkeys): add HotkeyBinding model + Carbon HotkeyManager (mv.hotkey.* namespace)"
+git add Sources/App/ActionDispatcher.swift Sources/App/HotkeyManager.swift
+git commit -m "feat(hotkeys): add ActionDispatcher adapter + Carbon HotkeyManager (ObservableObject, main-actor bridge)"
 ```
 
 ---
 
 ## Task 3: Wire `ActionDispatcher` + `HotkeyManager` into the app lifecycle
 
-`NoNoiseMacApp` creates both, passes them into `ContentView`, and registers the URL-scheme
-handler. `AppDelegate` gets a `application(_:open:)` fallback. No new entitlements.
+`NoNoiseMacApp` creates the dispatcher AND the `HotkeyManager` at **app startup** (in `init()`),
+holds both on `@StateObject`, passes references down to `ContentView`, and registers the
+URL-scheme handler. `AppDelegate` gets a `application(_:open:)` fallback. No new entitlements.
+
+> **Critical: hotkeys must register at launch, not on first popover open.** A `MenuBarExtra`'s
+> content view is only instantiated when the popover is first shown, so `ContentView.onAppear`
+> does NOT run at launch. Creating `HotkeyManager` in `onAppear` would leave every system-wide
+> hotkey DEAD until the user clicks the menu-bar icon — defeating the entire feature (a streamer
+> must be able to hit ⌃⌥B while focused in OBS, having never opened the popover). Both the
+> dispatcher and the `HotkeyManager` are therefore created in `NoNoiseMacApp.init()` and retained
+> on `@StateObject`, so Carbon registration happens during app launch.
 
 **Files:**
 - Modify: `Sources/App/NoNoiseMacApp.swift`
+- Modify: `Sources/App/ContentView.swift` (add the `dispatcher` + `hotkeyManager` stored
+  properties so the new `ContentView(...)` call site compiles; they are USED in Tasks 5–6).
 
-- [ ] **Step 1: Update `NoNoiseMacApp.swift`**
+- [ ] **Step 1: Add the new stored properties to `ContentView`**
+
+In `Sources/App/ContentView.swift`, extend `ContentView`'s property block so the call site
+below compiles (the properties are exercised by the bypass banner in Task 6 and the Settings
+threading in Task 5):
+
+```swift
+struct ContentView: View {
+    @ObservedObject var audioModel: AudioModel
+    @ObservedObject var dispatcher: ActionDispatcher
+    @ObservedObject var hotkeyManager: HotkeyManager
+    // body unchanged in this task
+```
+
+- [ ] **Step 2: Update `NoNoiseMacApp.swift`**
 
 Replace the entire file content with:
 
@@ -893,33 +1123,32 @@ import Core
 @main
 struct NoNoiseMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject var audioModel = AudioModel()
 
-    // ActionDispatcher and HotkeyManager are created once and live for the app's
-    // lifetime. HotkeyManager MUST be retained (Carbon hotkeys are unregistered on
-    // deinit) — storing it on @StateObject keeps it alive.
+    // The Core state machine, the action coordinator, and the Carbon hotkey layer are all
+    // created ONCE in init() and retained on @StateObject for the app's lifetime. Creating
+    // HotkeyManager here (NOT in ContentView.onAppear) guarantees global hotkeys are live
+    // from launch — the MenuBarExtra content view doesn't instantiate until the popover opens.
+    @StateObject var audioModel: AudioModel
     @StateObject private var dispatcher: ActionDispatcher
-    // HotkeyManager holds an unretained reference to dispatcher. It must be created
-    // AFTER dispatcher. We use a lazy wrapper via onAppear to avoid the init-order
-    // problem with @StateObject cross-reference.
-    @State private var hotkeyManager: HotkeyManager?
+    @StateObject private var hotkeyManager: HotkeyManager
 
     init() {
-        // @StateObject requires initialising via _wrappedValue on init; AudioModel
-        // is created first, then ActionDispatcher wraps it.
+        // Init order matters: AudioModel → ActionDispatcher(model:) → HotkeyManager(dispatcher:).
         let model = AudioModel()
+        let dispatcher = ActionDispatcher(model: model)
+        let hotkeys = HotkeyManager(dispatcher: dispatcher)   // registers Carbon hotkeys NOW
         _audioModel = StateObject(wrappedValue: model)
-        _dispatcher = StateObject(wrappedValue: ActionDispatcher(model: model))
+        _dispatcher = StateObject(wrappedValue: dispatcher)
+        _hotkeyManager = StateObject(wrappedValue: hotkeys)
     }
 
     var body: some Scene {
         MenuBarExtra {
-            ContentView(audioModel: audioModel, dispatcher: dispatcher)
+            ContentView(audioModel: audioModel, dispatcher: dispatcher, hotkeyManager: hotkeyManager)
                 .onAppear {
-                    if hotkeyManager == nil {
-                        hotkeyManager = HotkeyManager(dispatcher: dispatcher)
-                        appDelegate.dispatcher = dispatcher
-                    }
+                    // Wire the URL fallback once the scene graph exists. Hotkeys are ALREADY
+                    // registered (from init) — this only hands the dispatcher to AppDelegate.
+                    appDelegate.dispatcher = dispatcher
                 }
         } label: {
             Image(nsImage: NoNoiseLogoImage.menuBar(isActive: audioModel.isAIEnabled))
@@ -933,8 +1162,11 @@ struct NoNoiseMacApp: App {
     }
 }
 
+// @MainActor on the whole delegate: AppKit delivers these callbacks on the main thread, and it
+// lets us touch the @MainActor `dispatcher` and call `dispatch(_:)` without a concurrency error.
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
-    /// Set by NoNoiseMacApp after the first onAppear.
+    /// Set by NoNoiseMacApp once the scene appears (the dispatcher itself is created at launch).
     var dispatcher: ActionDispatcher?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -952,19 +1184,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 }
 ```
 
-- [ ] **Step 2: Build**
+> **Note (`@StateObject` cross-reference):** `HotkeyManager` holds a plain stored reference to
+> `dispatcher`, which is itself an independent object created first in `init()`. There is no
+> init-order cycle — both are fully constructed as local lets before being wrapped in
+> `StateObject`. The earlier `@State var hotkeyManager: HotkeyManager?` + `onAppear` lazy-init
+> approach is REJECTED precisely because it delays Carbon registration to first popover open.
+>
+> **Note (`@MainActor` construction in `App.init()`):** `ActionDispatcher` and `HotkeyManager`
+> are `@MainActor`. SwiftUI calls `@main App.init()` on the main thread, and under this package's
+> Swift 5.9 default concurrency checking this compiles cleanly (no `-strict-concurrency=complete`).
+> If a future Swift-6 mode flags it, annotate the `init()` (or the App type) `@MainActor` — do NOT
+> move construction back into `onAppear`, which would reintroduce the launch-timing bug.
+
+- [ ] **Step 3: Build**
 
 ```bash
 swift build
 ```
 
-Expected: build succeeds.
+Expected: build succeeds. (At this point `ContentView` has the new stored properties but the body
+does not yet read `dispatcher`/`hotkeyManager` — that lands in Tasks 5–6. SwiftUI tolerates unused
+stored `@ObservedObject` properties, so the build is green.)
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add Sources/App/NoNoiseMacApp.swift
-git commit -m "feat(app): wire ActionDispatcher + HotkeyManager into app lifecycle, URL open handler"
+git add Sources/App/NoNoiseMacApp.swift Sources/App/ContentView.swift
+git commit -m "feat(app): create dispatcher + HotkeyManager at launch (hotkeys live before popover opens)"
 ```
 
 ---
@@ -1019,11 +1265,19 @@ git commit -m "feat(url-scheme): register nonoisemac:// URL scheme in Info.plist
 
 ## Task 5: Hotkey Settings UI — view + rebind sheet
 
-Add a **Hotkeys** tab (or section within Settings) to `SettingsView` so users can see
-current bindings and rebind any action. A conflict warning is shown for collided slots.
+Add a **Hotkeys** tab to `SettingsView` so users can see current bindings and rebind any action.
+A conflict warning is shown for collided slots. Threading the `hotkeyManager` reference into the
+Settings window touches THREE files — all signatures and call sites are updated in this ONE task /
+commit so the build never lands in a half-threaded state.
 
 **Files:**
-- Modify: `Sources/App/SettingsView.swift`
+- Modify: `Sources/App/SettingsView.swift` — `HotkeySettingsView` + `RebindSheet` + `KeyCaptureView`;
+  `SettingsView(audioModel:)` → `SettingsView(audioModel:hotkeyManager:)`.
+- Modify: `Sources/App/ContentView.swift` — `ContentView` gains a `hotkeyManager` property;
+  `WindowManager.openSettings(model:)` → `WindowManager.openSettings(model:hotkeyManager:)`; both
+  `openSettings` call sites (header gear button + footer Settings button) pass `hotkeyManager`.
+- (`Sources/App/NoNoiseMacApp.swift` already passes `hotkeyManager:` to `ContentView(...)` from
+  Task 3 — no further change here.)
 
 No XCTest (SwiftUI view) — verified by build + manual smoke test.
 
@@ -1099,11 +1353,12 @@ struct HotkeySettingsView: View {
 
     private func hotkeyDisplayString(_ b: HotkeyBinding) -> String {
         var s = ""
+        // b.modifiers is a plain UInt32 (Core HotkeyModifier bits) — test bits directly.
         let m = b.modifiers
-        if m.contains(.control) { s += "⌃" }
-        if m.contains(.option)  { s += "⌥" }
-        if m.contains(.shift)   { s += "⇧" }
-        if m.contains(.command) { s += "⌘" }
+        if m & HotkeyModifier.control.rawValue != 0 { s += "⌃" }
+        if m & HotkeyModifier.option.rawValue  != 0 { s += "⌥" }
+        if m & HotkeyModifier.shift.rawValue   != 0 { s += "⇧" }
+        if m & HotkeyModifier.command.rawValue != 0 { s += "⌘" }
         // Map common kVK codes to printable glyphs (non-exhaustive — covers the default set).
         let keyGlyphs: [UInt32: String] = [
             0x2D: "N", 0x0B: "B", 0x1E: "]", 0x21: "[", 0x08: "C",
@@ -1114,6 +1369,7 @@ struct HotkeySettingsView: View {
     }
 }
 
+// HotkeyActionID is declared in Core; add Identifiable conformance here (App-only, for SwiftUI).
 extension HotkeyActionID: Identifiable {
     public var id: String { rawValue }
 }
@@ -1194,33 +1450,115 @@ final class _KeyCaptureNSView: NSView {
     override func keyDown(with event: NSEvent) {
         // Ignore bare modifiers; wait for a real key code.
         guard event.keyCode != 0xFF else { return }
+        // Adapt NSEvent.ModifierFlags → plain UInt32 mask at the App boundary. The relevant bits
+        // (command/option/shift/control) share the same raw values as Core's HotkeyModifier, so
+        // the masked rawValue maps 1:1.
+        let masked = event.modifierFlags.intersection([.command, .option, .shift, .control])
         let binding = HotkeyBinding(keyCode: UInt32(event.keyCode),
-                                    modifiers: event.modifierFlags.intersection([.command, .option, .shift, .control]))
+                                    modifiers: UInt32(masked.rawValue))
         onCapture?(binding)
     }
 }
 ```
 
-- [ ] **Step 2: Add a Hotkeys tab to the top-level `SettingsView`**
+- [ ] **Step 2: Add the Hotkeys tab to `SettingsView` and accept `hotkeyManager`**
 
-In `Sources/App/SettingsView.swift`, find the existing `TabView` (or `SettingsView` body)
-and add a Hotkeys tab after the General tab:
+In `Sources/App/SettingsView.swift`, change `SettingsView` to take the manager and add the tab.
+Replace the existing `SettingsView` struct with:
 
 ```swift
-TabView {
-    GeneralSettingsView(audioModel: audioModel)
-        .tabItem { Label("General", systemImage: "slider.horizontal.3") }
-    HotkeySettingsView(manager: hotkeyManager)
-        .tabItem { Label("Hotkeys", systemImage: "keyboard") }
+struct SettingsView: View {
+    @ObservedObject var audioModel: AudioModel
+    @ObservedObject var hotkeyManager: HotkeyManager
+
+    var body: some View {
+        TabView {
+            GeneralSettingsView(audioModel: audioModel)
+                .tabItem {
+                    Label("General", systemImage: "slider.horizontal.3")
+                }
+
+            HotkeySettingsView(manager: hotkeyManager)
+                .tabItem {
+                    Label("Hotkeys", systemImage: "keyboard")
+                }
+
+            GuideView()
+                .tabItem {
+                    Label("Setup Guide", systemImage: "book.pages")
+                }
+        }
+        .padding(20)
+        .frame(minWidth: 500, minHeight: 440)
+    }
 }
 ```
 
-The `hotkeyManager` reference must be threaded from `ContentView` → `WindowManager.openSettings`
-→ `SettingsView`. Update `WindowManager.openSettings(model:)` to accept an additional
-`hotkeyManager: HotkeyManager` parameter and update all call sites in `ContentView.swift`
-and `NoNoiseMacApp.swift`.
+- [ ] **Step 3: Thread `hotkeyManager` through `ContentView` and `WindowManager`**
 
-- [ ] **Step 3: Build**
+In `Sources/App/ContentView.swift` (`ContentView` already has the `hotkeyManager` stored
+property from Task 3 — here we start USING it):
+
+1. Update BOTH `openSettings` call sites — the header gear button and the footer Settings
+   button — to pass `hotkeyManager`:
+
+```swift
+// header gear button
+Button {
+    WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager)
+} label: {
+    Image(systemName: "gearshape.fill")
+        .font(.system(size: 14))
+        .foregroundColor(.secondary)
+}
+.buttonStyle(.plain)
+.help("Settings")
+```
+
+```swift
+// footer Settings button
+Button {
+    WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager)
+} label: {
+    Label("Settings", systemImage: "slider.horizontal.3")
+}
+.controlSize(.small)
+```
+
+2. Update `WindowManager.openSettings` to take and forward `hotkeyManager`:
+
+```swift
+static func openSettings(model: AudioModel, hotkeyManager: HotkeyManager) {
+    if settingsWindow == nil {
+        let view = SettingsView(audioModel: model, hotkeyManager: hotkeyManager)
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
+                            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                            backing: .buffered, defer: false)
+        panel.center()
+        panel.title = "NoNoise Mac Settings"
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.contentView = NSHostingView(rootView: view)
+        panel.isFloatingPanel = false
+        panel.isReleasedWhenClosed = false
+        panel.minSize = NSSize(width: 480, height: 420)
+
+        settingsWindow = panel
+
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: panel, queue: nil) { _ in
+            settingsWindow = nil
+        }
+    }
+    settingsWindow?.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+}
+```
+
+> All four touch points — `SettingsView` init, `WindowManager.openSettings`, and the two
+> `ContentView` call sites — change together. `NoNoiseMacApp` already passes
+> `hotkeyManager: hotkeyManager` into `ContentView(...)` from Task 3.
+
+- [ ] **Step 4: Build**
 
 ```bash
 swift build
@@ -1228,11 +1566,11 @@ swift build
 
 Expected: build succeeds.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
-```swift
-git add Sources/App/SettingsView.swift
-git commit -m "feat(ui): add Hotkeys settings tab with rebind sheet and conflict warnings"
+```bash
+git add Sources/App/SettingsView.swift Sources/App/ContentView.swift
+git commit -m "feat(ui): add Hotkeys settings tab + thread hotkeyManager through ContentView/WindowManager"
 ```
 
 ---
@@ -1247,11 +1585,11 @@ active, so the user knows they are in passthrough mode.
 
 No XCTest — build + manual.
 
-- [ ] **Step 1: Thread `dispatcher` into `ContentView`**
+- [ ] **Step 1: Confirm the `dispatcher` property**
 
-Add `@ObservedObject var dispatcher: ActionDispatcher` as a property of `ContentView`.
-Update the `ContentView(audioModel:)` call site in `NoNoiseMacApp.swift` to pass
-`dispatcher: dispatcher` (already handled in Task 3).
+`ContentView` already declares `@ObservedObject var dispatcher: ActionDispatcher` (added in
+Task 3) and `NoNoiseMacApp` already passes `dispatcher: dispatcher`. This task adds the first
+use of `dispatcher.isBypassed` in the body.
 
 - [ ] **Step 2: Add the bypass indicator**
 
@@ -1457,9 +1795,13 @@ git commit -m "feat(cli): add --action verb to send one-shot control via URL sch
 
 **Files:**
 - Modify: `README.md`
-- Modify: `AGENTS.md`
+- Modify: `AGENTS.md` (the repo's `CLAUDE.md` is a **symlink** to `AGENTS.md` — editing
+  `AGENTS.md` updates both; do NOT create a separate `CLAUDE.md`)
 - Modify: `docs/knowledge/timeline1.md`
 - Modify: `docs/knowledge/knowledge1.md`
+
+> **Doc target note:** `CLAUDE.md` → `AGENTS.md` is a symlink (verified: `ls -la CLAUDE.md`
+> shows `CLAUDE.md -> AGENTS.md`). All agent-guide edits go in `AGENTS.md`.
 
 - [ ] **Step 1: `README.md`** — add a section after the "🎙️ Broadcast Voice" bullet (added by the broadcast-voice plan):
 
@@ -1509,44 +1851,88 @@ Or from a terminal / shell script: `open nonoisemac://toggle` (or `NoNoiseMacCLI
 during a recording). Release to restore AI. ⌃⌥⇧B toggles bypass on/off persistently.
 ```
 
+Also update the "How it works" Voice Polish bullet so the documented chain order is the merged,
+canonical order (presence + de-esser are part of the chain, not omitted). Find this line:
+
+```markdown
+- An optional **Voice Polish** chain (high-pass → shelves → compressor → limiter) adds tone
+  and leveling for Podcast/Tutorial modes.
+```
+
+and replace it with:
+
+```markdown
+- An optional **Voice Polish** chain (high-pass → shelves → presence → de-esser → compressor →
+  limiter) adds tone, clarity, and leveling for Podcast/Tutorial modes and Broadcast Voice.
+```
+
 - [ ] **Step 2: `AGENTS.md`** — add a new section "Control layer (Tier 4)" after the "Voice polish chain (Tier 2)" section:
 
 ```markdown
-## Control layer (Tier 4) — `Sources/App/ActionDispatcher.swift`, `HotkeyManager.swift`
+## Control layer (Tier 4) — `Sources/Core/ControlLayer.swift`, `Sources/App/ActionDispatcher.swift`, `Sources/App/HotkeyManager.swift`
 
-- `ActionDispatcher` (@MainActor) is the single dispatch point for all user-initiated
-  control actions (`ControlAction` enum). It owns the A/B bypass state (`isBypassedMomentary`
-  / `isBypassedToggle`). All action dispatches to `AudioModel` happen on the main thread.
-- `HotkeyManager` (@MainActor) uses Carbon `RegisterEventHotKey` + `InstallEventHandler`.
-  **Do NOT switch to `NSEvent.addGlobalMonitorForEvents`** — that requires Accessibility
-  permission, which violates the minimal-entitlement policy (AGENTS.md "Entitlements & signing").
-  Carbon hotkeys work with the existing two entitlements and no permission prompt.
-- Bindings are persisted under `mv.hotkey.*` keys in `UserDefaults` (consistent with the
-  existing `mv.*` namespace). `HotkeyBinding` encodes as `"<keyCode>:<modifierRawValue>"`.
-- If `RegisterEventHotKey` returns `eventHotKeyExistsErr` (-9878), the slot is left
-  unregistered and surfaced in `conflictedActions` (shown in Settings → Hotkeys). Never crash.
-- A/B bypass shadows `AudioModel.isAIEnabled` WITHOUT persisting the change — when bypass
-  is released, the original `isAIEnabled` preference is restored. This is the only place where
-  `isAIEnabled` is written from outside its `didSet` persistence path.
+- **Core/App split (so it stays testable):** the PURE models — `ControlAction` (URL/CLI parsers
+  + gain constants), `HotkeyActionID`, `HotkeyBinding`, `HotkeyModifier`, `ControlState`, and the
+  `ControlReducer` state machine — live in `Sources/Core/ControlLayer.swift` and import only
+  `Foundation`. The test target depends on `Core` only, so the REAL dispatch logic (bypass
+  transitions, desired-vs-effective AI, gain clamping, cycling) is unit-tested via `ControlReducer`
+  (`Tests/NoNoiseMacTests/ControlLayerTests.swift`) WITHOUT constructing `AudioModel`.
+- `ActionDispatcher` (@MainActor, App) is a thin adapter: it reads a `ControlState` snapshot from
+  `AudioModel`, runs `ControlReducer.reduce`, and writes the result back. It is the single dispatch
+  point for all control actions. It is NOT headless-testable (depends on `AudioModel` → CoreAudio).
+- **A/B bypass = desired-vs-effective AI.** `desiredAIEnabled` is the user's intended AI on/off
+  ignoring bypass; effective = `desiredAI && !(momentary || toggle bypass)`. `.toggleAI` ALWAYS
+  flips `desiredAI` (even while bypassed); on bypass exit, `AudioModel.isAIEnabled` follows the
+  current desired value. Firing toggle-AI mid-bypass therefore does NOT turn AI back on against the
+  bypass. Bypass state is session-only (never persisted); `desiredAI` mirrors the persisted
+  `isAIEnabled`. This is the only place `isAIEnabled` is written from outside its `didSet` path.
+- `HotkeyManager` (@MainActor, App) uses Carbon `RegisterEventHotKey` + `InstallEventHandler`.
+  **Do NOT switch to `NSEvent.addGlobalMonitorForEvents`** — that requires Accessibility permission,
+  violating the minimal-entitlement policy (AGENTS.md "Entitlements & signing"). Carbon hotkeys work
+  with the existing two entitlements and no permission prompt.
+- **Hotkeys register at app launch**, in `NoNoiseMacApp.init()` (HotkeyManager held on `@StateObject`),
+  NOT in `ContentView.onAppear` — a `MenuBarExtra`'s content view isn't instantiated until the
+  popover opens, so onAppear-registration would leave hotkeys dead until first click.
+- **`EventHotKeyID.id` is deterministic** (`HotkeyActionID.allCases` index + 1), NOT
+  `rawValue.hashValue` — Swift's `hashValue` is randomized per process and would make the fired ID
+  un-matchable back to its action.
+- The Carbon C callback extracts the `EventHotKeyID` synchronously, then hops to the main actor via
+  `Task { @MainActor in … }` before touching `HotkeyManager`/`ActionDispatcher` (both `@MainActor`).
+- `HotkeyBinding` stores a plain `UInt32` modifier mask (Core `HotkeyModifier` bits, which equal the
+  AppKit `NSEvent.ModifierFlags` device-independent bits). Core never imports AppKit; `HotkeyManager`
+  / `KeyCaptureView` adapt `NSEvent.ModifierFlags` ↔ `UInt32` at the App boundary. Encodes as
+  `"<keyCode>:<modifierMask>"`.
+- Bindings persist under `mv.hotkey.*` keys (consistent with the existing `mv.*` namespace).
+- If `RegisterEventHotKey` returns `eventHotKeyExistsErr` (-9878), the slot is left unregistered and
+  surfaced in `conflictedActions` (shown in Settings → Hotkeys). Never crash.
+- Gain nudge clamps to `0.5...4.0` — the SAME range as the Settings → General "Output Gain" slider
+  (`SettingsView.gainCard`). Keep these in sync if the slider range ever changes.
 - `nonoisemac://` URL scheme is registered in `Resources/Info.plist` (`CFBundleURLTypes`).
-  **This only works in a bundled `.app`** — `swift run` / `swift build` do not register URL
-  schemes. Test via `./bundle.sh` + opening `NoNoiseMac.app`.
-- `ControlAction` (URL/CLI parsers + gain constants) lives in the `App` target and IS
-  unit-testable headlessly (`Tests/NoNoiseMacTests/ActionDispatcherTests.swift`). The Carbon
-  registration and SwiftUI wiring are NOT tested headlessly (same policy as `AudioModel`).
+  **This only works in a bundled `.app`** — `swift run` / `swift build` do not register URL schemes.
+  Test via `./bundle.sh` + opening `NoNoiseMac.app`.
 ```
+
+> **Voice-chain order in this section / any docs you touch:** use the canonical merged order
+> `hp → shelves → presence → deEsser → comp → limiter` (matching the existing "Voice polish chain
+> (Tier 2)" entry). Do not document a truncated `hp → shelves → comp → limiter` that omits the
+> Broadcast Voice clarity stages.
 
 - [ ] **Step 3: `docs/knowledge/timeline1.md`** — append:
 
 ```markdown
 ## 2026-06-15 — Control layer (global hotkeys + A/B bypass + Stream Deck) added
 
-Added `ActionDispatcher` + `ControlAction` (Sources/App) for all user-facing control
-actions (toggle AI, A/B bypass momentary/toggle, cycle preset, cycle clarity, nudge gain).
-`HotkeyManager` registers system-wide Carbon `RegisterEventHotKey` combos (default ⌃⌥
-modifier set) with UserDefaults persistence under `mv.hotkey.*`. `nonoisemac://` URL scheme
-registered in `Resources/Info.plist` for Stream Deck "Open" / `open` CLI. A/B bypass
-shadows `isAIEnabled` without persisting. `NoNoiseMacCLI` extended with `--action <verb>`.
+Added the pure control models + `ControlReducer` to `Sources/Core/ControlLayer.swift`
+(`ControlAction`, `HotkeyActionID`, `HotkeyBinding`, `HotkeyModifier`, `ControlState`) so the
+real dispatch logic is unit-tested headlessly without `AudioModel`. `ActionDispatcher`
+(Sources/App) adapts the reducer onto a live `AudioModel`. `HotkeyManager` (Sources/App)
+registers system-wide Carbon `RegisterEventHotKey` combos (default ⌃⌥ set, deterministic
+`EventHotKeyID`s) with UserDefaults persistence under `mv.hotkey.*`; created at app launch in
+`NoNoiseMacApp.init()` so hotkeys are live before the popover opens. `nonoisemac://` URL scheme
+registered in `Resources/Info.plist`. A/B bypass uses a desired-vs-effective AI model: while
+bypassed, AI is forced off and toggle-AI updates the DESIRED state (restored on bypass exit) —
+never persisted. Gain nudge clamps to the slider's `0.5...4.0`. `NoNoiseMacCLI` extended with
+`--action <verb>`.
 ```
 
 - [ ] **Step 4: `docs/knowledge/knowledge1.md`** — append a `[DECISION]` entry:
@@ -1562,6 +1948,44 @@ Accessibility permission — violating the minimal-entitlement policy.
 **Rule**: Never add Accessibility permission for hotkey capture in this app. If global key
 monitoring is ever needed beyond registered combos, revisit and document the permission impact.
 **Files**: `Sources/App/HotkeyManager.swift`, `Resources/NoNoiseMac.entitlements`
+
+## 2026-06-15 — [PATTERN] Pure reducer in Core makes the control layer testable (@<username>)
+
+**Problem**: The test target depends on `Core` only; `AudioModel.init()` starts CoreAudio so it
+is not headless-testable. Putting control logic in `Sources/App` (consumed via `@testable import
+Core`) would be untestable and would not even compile from tests.
+**Decision**: Keep the PURE models + a `ControlReducer` over a value-type `ControlState` in
+`Sources/Core/ControlLayer.swift`. `ActionDispatcher` (App) is a thin adapter (read state from
+`AudioModel` → reduce → write back). Tests exercise the reducer directly — no test-only branches.
+**Rule**: Any control/state logic that must be tested goes in `Core` as a pure function over a
+value type; the App layer only adapts it onto live objects. Never put testable logic in `App`.
+**Files**: `Sources/Core/ControlLayer.swift`, `Sources/App/ActionDispatcher.swift`,
+`Tests/NoNoiseMacTests/ControlLayerTests.swift`
+
+## 2026-06-15 — [GOTCHA] A/B bypass needs desired-vs-effective AI state (@<username>)
+
+**Problem**: Naïvely saving `isAIEnabled` on bypass entry and restoring on exit breaks if the user
+toggles AI WHILE bypassed: the toggle flips the forced-off live value, then bypass exit clobbers it
+back to the pre-bypass value — the toggle is lost.
+**Root Cause**: A single `isAIEnabled` field conflated "what the user wants" with "what's playing".
+**Fix**: Separate `desiredAI` (what the user wants, flipped by `.toggleAI` always) from effective AI
+(`desiredAI && !bypassed`, written to `AudioModel.isAIEnabled`). Bypass exit recomputes effective
+from the CURRENT desired value. See `ControlReducer` + the bypass-sequence tests.
+**Rule**: When a transient override (bypass) suppresses a user-settable flag, store the user's
+desired value separately and recompute the effective value — don't save/restore the live value.
+**Files**: `Sources/Core/ControlLayer.swift`, `Tests/NoNoiseMacTests/ControlLayerTests.swift`
+
+## 2026-06-15 — [GOTCHA] Carbon EventHotKeyID must be deterministic, not hashValue (@<username>)
+
+**Problem**: Building `EventHotKeyID.id` from `action.rawValue.hashValue` makes the fired hotkey
+ID un-matchable: Swift's `String.hashValue` is randomized per process, so the value used at
+registration differs from naive reconstruction and the event can't be routed back to its action.
+**Fix**: Derive the numeric ID from the action's index in `HotkeyActionID.allCases` (+1, never 0).
+Also: the Carbon C callback must not call a `@MainActor` method synchronously — extract the
+`EventHotKeyID` in the callback, then hop via `Task { @MainActor in … }`.
+**Rule**: Carbon `EventHotKeyID`s must be stable, deterministic small integers; bridge C callbacks
+to the main actor explicitly instead of assuming the calling thread.
+**Files**: `Sources/App/HotkeyManager.swift`
 ```
 
 - [ ] **Step 5: Commit**
@@ -1584,49 +2008,57 @@ open NoNoiseMac.app  # install+open (or ./install-app.sh)
 
 ### Hotkey tests
 
-1. Open the popover. Confirm **Noise Cancellation** toggle is ON.
-2. Press ⌃⌥N (default toggle). Confirm the toggle flips OFF; press again, confirm ON.
-3. Hold ⌃⌥B — the popover (if open) should show the orange A/B Bypass banner. Release — banner disappears, AI resumes.
+0. **Hotkeys live before popover open (regression for the onAppear bug):** Launch the app and DO
+   NOT click the menu-bar icon. With focus in another app (e.g. TextEdit), press ⌃⌥N. The menu-bar
+   icon must change state (AI off ↔ on) WITHOUT ever opening the popover. If nothing happens until
+   the popover is first opened, the HotkeyManager is being created in `ContentView.onAppear` instead
+   of `NoNoiseMacApp.init()` — fix Task 3.
+1. Open the popover. Confirm **Noise Cancellation** toggle reflects the current state.
+2. Press ⌃⌥N (default toggle). Confirm the toggle flips; press again, confirm it flips back.
+3. Hold ⌃⌥B — the popover (if open) shows the orange A/B Bypass banner; AI is heard as raw mic.
+   Release — banner disappears, AI resumes at its pre-bypass value.
 4. Press ⌃⌥⇧B — bypass toggles ON (banner). Press again — bypass toggles OFF.
-5. Press ⌃⌥] — preset advances. Press ⌃⌥[ — preset retreats.
-6. Press ⌃⌥C — Broadcast Voice clarity cycles.
-7. Press ⌃⌥= and ⌃⌥- — observe gain going up/down in Settings (or check `outputGainValue` behavior).
+5. **Desired-vs-effective regression:** With AI ON, hold ⌃⌥B (bypass on, raw mic), and WHILE holding
+   press ⌃⌥N (toggle). Release ⌃⌥B. Confirm AI stays OFF (the toggle won) — it must NOT snap back ON.
+6. Press ⌃⌥] — preset advances. Press ⌃⌥[ — preset retreats.
+7. Press ⌃⌥C — Broadcast Voice clarity cycles.
+8. Press ⌃⌥= and ⌃⌥- — observe gain going up/down in Settings; confirm it never exceeds 4.0 or drops below 0.5.
 
 ### Settings → Hotkeys tab
 
-8. Open Settings. A **Hotkeys** tab appears.
-9. Confirm all 8 bindings are listed with their default combos.
-10. Click **Edit** on one binding, press a new combo (e.g. ⌃⌥⇧N), click **Save**.
-11. Quit and relaunch — confirm the rebound combo is restored (persistence via `mv.hotkey.*`).
-12. Try binding to a combo already in use by another app — confirm the slot shows the conflict warning and the old hotkey no longer fires.
+9. Open Settings. A **Hotkeys** tab appears.
+10. Confirm all 8 bindings are listed with their default combos.
+11. Click **Edit** on one binding, press a new combo (e.g. ⌃⌥⇧N), click **Save**.
+12. Quit and relaunch — confirm the rebound combo is restored (persistence via `mv.hotkey.*`).
+13. Try binding to a combo already in use by another app — confirm the slot shows the conflict warning and the old hotkey no longer fires.
 
 ### URL scheme (Stream Deck path)
 
 > URL-scheme registration only works in the bundled `.app` — not in `swift run`.
 
-13. With `NoNoiseMac.app` running: `open nonoisemac://toggle` in Terminal. Confirm AI toggles.
-14. `open nonoisemac://bypass` — confirm bypass activates (orange banner if popover is open).
-15. `open nonoisemac://preset/next` — confirm preset cycles.
-16. `open nonoisemac://clarity/next` — confirm Broadcast Voice cycles.
-17. `open nonoisemac://gain/up` — confirm gain increases.
-18. **Stream Deck:** Add a "Open" button → URL → `nonoisemac://toggle`. Press the button on the Stream Deck. Confirm AI toggles.
+14. With `NoNoiseMac.app` running: `open nonoisemac://toggle` in Terminal. Confirm AI toggles.
+15. `open nonoisemac://bypass` — confirm bypass activates (orange banner if popover is open).
+16. `open nonoisemac://preset/next` — confirm preset cycles.
+17. `open nonoisemac://clarity/next` — confirm Broadcast Voice cycles.
+18. `open nonoisemac://gain/up` — confirm gain increases.
+19. **Stream Deck:** Add a "Open" button → URL → `nonoisemac://toggle`. Press the button on the Stream Deck. Confirm AI toggles.
 
 ### CLI action mode
 
-19. (Requires the `.app` to be running and registered): `./NoNoiseMacCLI --action toggle` — confirm AI toggles.
-20. `./NoNoiseMacCLI --action preset-next` — confirm preset cycles.
-21. `./NoNoiseMacCLI --help` — confirm the Stream Deck URL reference and verb list are printed.
+20. (Requires the `.app` to be running and registered): `./NoNoiseMacCLI --action toggle` — confirm AI toggles.
+21. `./NoNoiseMacCLI --action preset-next` — confirm preset cycles.
+22. `./NoNoiseMacCLI --help` — confirm the Stream Deck URL reference and verb list are printed.
 
 ### Persistence
 
-22. Set a non-default preset, toggle bypass, quit and relaunch. Confirm:
+23. Set a non-default preset, toggle bypass, quit and relaunch. Confirm:
     - Preset restored correctly.
     - Bypass is NOT restored (it is session-only, not persisted).
-    - `isAIEnabled` is restored to its pre-bypass value.
+    - `isAIEnabled` is restored to its desired (pre-bypass) value — the persisted preference is correct because bypass never persists, and `desiredAI` mirrors it.
 
 ### Regression
 
-23. With all features off (AI on, default preset, clarity off, no bypass), confirm the audio output is byte-for-byte equivalent to a build without this feature (the control layer only dispatches; it has no DSP path of its own).
+24. With all features off (AI on, default preset, clarity off, no bypass), confirm the audio output is byte-for-byte equivalent to a build without this feature (the control layer only dispatches; it has no DSP path of its own).
 
 ---
 
@@ -1639,17 +2071,37 @@ open NoNoiseMac.app  # install+open (or ./install-app.sh)
   in `HotkeyManager.swift` inline comment, and in `AGENTS.md`. No ambiguity left for future agents.
 - **URL-scheme SwiftPM caveat documented:** Task 4 Step 3 note + smoke test calls it out.
   `swift run` will NOT register the scheme; only the bundled `.app` will.
-- **A/B bypass persistence contract documented:** Bypass state is session-only. When bypass
-  ends, `isAIEnabled` is restored to its saved preference, not persisted. Confirmed in smoke
-  test step 22.
+- **A/B bypass = desired-vs-effective:** `desiredAI` is separate from effective AI; `.toggleAI`
+  always flips desired (even while bypassed); bypass exit recomputes effective from current desired.
+  Bypass is session-only. Verified by `ControlReducer` tests (bypass↓→toggle→bypass↑, overlap,
+  bypass+preset) and smoke-test steps 5 + 23.
+- **Testability (reviewer fix #1/#6):** the pure models + `ControlReducer` live in `Sources/Core`
+  (test target depends on `Core` only) and the REAL dispatch logic is unit-tested via the reducer —
+  no `AudioModel`, no test-only branches. `HotkeyBinding` stores a plain `UInt32` mask, adapted to
+  `NSEvent.ModifierFlags` only at the App boundary.
+- **Launch-time hotkey registration (reviewer fix #2):** `HotkeyManager` is created in
+  `NoNoiseMacApp.init()` (held on `@StateObject`), not in `ContentView.onAppear` — hotkeys are live
+  before the popover is ever opened. Smoke-test step 0 guards this.
+- **Compilation correctness (reviewer fix #3):** `ActionDispatcher` + `HotkeyManager` both conform
+  to `ObservableObject`; `import AppKit`/`Combine`/`Carbon.HIToolbox` present; the Carbon C callback
+  hops to the main actor via `Task { @MainActor in … }`; `EventHotKeyID`s are deterministic
+  (`allCases` index + 1), not `hashValue`.
+- **Gain bounds (reviewer fix #7):** clamp range is `0.5...4.0`, matching the Settings slider.
 - **`mv.*` namespace preserved:** All new persistence keys use `mv.hotkey.*` (consistent with
   the existing `mv.preset`, `mv.suppressionStrength`, etc.).
-- **No MetalVoice/Ghostkwebb in Sources/:** New files are in `Sources/App/` and use the
-  `NoNoiseMac`/`ActionDispatcher`/`HotkeyManager`/`ControlAction` identifiers.
+- **No MetalVoice/Ghostkwebb in Sources/:** New files are `Sources/Core/ControlLayer.swift`,
+  `Sources/App/ActionDispatcher.swift`, `Sources/App/HotkeyManager.swift` — all branded identifiers.
 - **Render thread untouched:** `ActionDispatcher.dispatch` writes to `AudioModel`'s
   `@Published` properties on the main thread — the same pattern as the existing `outputGainValue`
   knob. No new lock or synchronisation primitive needed.
+- **Docs target (reviewer fix #8):** agent-guide edits go in `AGENTS.md` (`CLAUDE.md` is its
+  symlink); voice-chain order documented as the merged `hp → shelves → presence → deEsser → comp →
+  limiter`.
+- **Threading completeness (reviewer fix #5):** Task 5 updates `SettingsView`, `WindowManager.openSettings`,
+  the `ContentView` property, and BOTH `openSettings` call sites in one commit (`SettingsView.swift`
+  + `ContentView.swift`).
 - **Placeholder scan:** No placeholders. All code shown is complete and copy-pasteable.
-- **Type consistency:** `ControlAction`, `HotkeyBinding`, `HotkeyActionID`, `HotkeyManager`,
-  `ActionDispatcher`, `KeyCaptureView`, `RebindSheet`, `HotkeySettingsView` used consistently
-  across tasks. `HotkeyActionID` conforms to `Identifiable` in the UI task where needed.
+- **Type consistency:** `ControlAction`, `ControlReducer`, `ControlState`, `HotkeyBinding`,
+  `HotkeyActionID`, `HotkeyModifier`, `HotkeyManager`, `ActionDispatcher`, `KeyCaptureView`,
+  `RebindSheet`, `HotkeySettingsView` used consistently across tasks. `HotkeyActionID` conforms to
+  `Identifiable` in the UI task where needed.
