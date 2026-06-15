@@ -176,7 +176,7 @@ Microphone ─▶ Capture (48 kHz) ─▶ Ring buffer ─▶ STFT
                                                    │
                             DeepFilterNet3 (CoreML, Neural Engine)
                                                    │
-                                ISTFT ─▶ Voice Polish (EQ · compressor · limiter)
+                                ISTFT ─▶ Voice shaping (polish · Broadcast Voice · Mouth Noise)
                                                    │
                                              Virtual cable ─▶ your app
 ```
@@ -186,6 +186,8 @@ Microphone ─▶ Capture (48 kHz) ─▶ Ring buffer ─▶ STFT
   model exactly — see [`AGENTS.md`](AGENTS.md) and [`CONCEPTS.md`](CONCEPTS.md).
 - An optional **Voice Polish** chain (high-pass → shelves → compressor → limiter) adds tone
   and leveling for Podcast/Tutorial modes.
+- Optional **Broadcast Voice** (presence → de-esser) and **Mouth Noise** (de-plosive → de-click)
+  finisher stages layer on any mode — each Off by default and identity-at-rest.
 
 ## 🔒 Privacy
 
