@@ -199,21 +199,21 @@ struct GuideView: View {
                     .font(.headline)
                     .padding(.bottom, 2)
 
-                StepRow(number: 1, title: "Input: Your Microphone",
-                        description: "Select your real physical microphone (e.g. Built-in, USB Mic) as the Input Device.")
+                StepRow(number: 1, title: "Install NoNoise Mic",
+                        description: "Run ./build-driver.sh then sudo ./install-driver.sh once. This adds a 'NoNoise Mic' microphone that any app can select directly — no BlackHole needed.")
                 Divider()
-                StepRow(number: 2, title: "Output: Virtual Cable",
-                        description: "Select 'BlackHole 2ch' (Recommended) as the Output Device.\nThis sends the enhanced audio to the virtual cable.")
+                StepRow(number: 2, title: "Input: Your Microphone",
+                        description: "Select your real physical microphone (e.g. Built-in, USB Mic) as the Input Device. Output is automatic — cleaned audio is routed to the hidden 'NoNoise Mic Engine'; there is no Output Device to choose.")
                 Divider()
-                StepRow(number: 3, title: "Chat App Setup",
-                        description: "In Discord, Zoom, or OBS, set the Input Device to the same virtual cable (e.g. 'BlackHole 2ch').")
+                StepRow(number: 3, title: "Chat App: Pick 'NoNoise Mic'",
+                        description: "In Slack, Zoom, Meet, Discord, or OBS, set the Microphone to 'NoNoise Mic'.")
                 Divider()
                 StepRow(number: 4, title: "You're Live",
                         description: "Noise cancellation is ON by default. Toggle it any time from the menu bar. Your voice is now crystal clear!")
 
                 HStack {
                     Spacer()
-                    Label("Tip: You can use any virtual audio driver (like VB-Cable), but BlackHole is recommended.",
+                    Label("No driver? Fallback: set the Output Device to 'BlackHole 2ch' and point your chat app's microphone at 'BlackHole 2ch' instead.",
                           systemImage: "lightbulb.fill")
                         .font(.caption)
                         .foregroundColor(.secondary)

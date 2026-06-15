@@ -31,6 +31,9 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
              setupPlaybackEngine()
         }
     }
+    /// True when the visible "NoNoise Mic" virtual device is installed (resolved by UID, so it
+    /// works even though that device is INPUT-only and absent from the output-scoped scan).
+    @Published public var driverInstalled: Bool = false
     
     @Published public var isPlayingTestTone: Bool = false {
         didSet {
@@ -251,6 +254,22 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         applyVoiceChain()
     }
     
+    /// Resolve a device UID to its AudioObjectID via the HAL. Works for INPUT-only devices too
+    /// (unlike the output-scoped scan), so it's how we detect the visible "NoNoise Mic".
+    private func deviceID(forUID uid: String) -> AudioObjectID {
+        var translated = AudioObjectID(0)
+        var cfUID = uid as CFString
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        withUnsafeMutablePointer(to: &cfUID) { uidPtr in
+            _ = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr,
+                                           UInt32(MemoryLayout<CFString>.size), uidPtr, &size, &translated)
+        }
+        return translated
+    }
+
     func fetchOutputDevices() {
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
@@ -264,6 +283,11 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &dataSize, &deviceIDs)
         
         var newDevs: [DeviceStruct] = []
+        // allDevs/uidToID cover only OUTPUT-capable devices (this block runs under `if size > 0`),
+        // which is exactly the route-target set: the engine is output-capable. The input-only
+        // visible "NoNoise Mic" is intentionally absent here — it's detected by UID translate below.
+        var allDevs: [VirtualMicRouting.DeviceInfo] = []
+        var uidToID: [String: AudioObjectID] = [:]
         
         for id in deviceIDs {
             // Check Output Channels
@@ -276,20 +300,44 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
                 var namePtr: Unmanaged<CFString>?
                 var nameAddr = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
                 AudioObjectGetPropertyData(id, &nameAddr, 0, nil, &nameSize, &namePtr)
-                if let cf = namePtr?.takeRetainedValue() {
-                    newDevs.append(DeviceStruct(id: id, name: cf as String))
+                guard let cf = namePtr?.takeRetainedValue() else { continue }
+                let name = cf as String
+
+                // REAL UID — not the name. Only a UID translates to an AudioObjectID at runtime,
+                // so filling DeviceInfo.uid with the name would silently break auto-route.
+                var uidPtr: Unmanaged<CFString>?
+                var uidSize = UInt32(MemoryLayout<CFString?>.size)
+                var uidAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceUID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+                AudioObjectGetPropertyData(id, &uidAddr, 0, nil, &uidSize, &uidPtr)
+                let realUID = (uidPtr?.takeRetainedValue() as String?) ?? name
+
+                // Hidden flag (absent on most devices; treat absent as not-hidden).
+                var hidden: UInt32 = 0
+                var hiddenSize = UInt32(MemoryLayout<UInt32>.size)
+                var hiddenAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyIsHidden, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+                if AudioObjectHasProperty(id, &hiddenAddr) {
+                    AudioObjectGetPropertyData(id, &hiddenAddr, 0, nil, &hiddenSize, &hidden)
+                }
+
+                let info = VirtualMicRouting.DeviceInfo(uid: realUID, name: name, isHidden: hidden != 0, hasOutput: true)
+                allDevs.append(info)
+                uidToID[realUID] = id
+                if VirtualMicRouting.isSelectableOutput(info) {   // exclude hidden + our engine from the user's picker
+                    newDevs.append(DeviceStruct(id: id, name: name))
                 }
             }
         }
         
         DispatchQueue.main.async {
             self.outputDevices = newDevs
-            // Default to BlackHole if exists
-            if let bh = newDevs.first(where: { $0.name.contains("BlackHole") }) {
-                self.selectedOutputDeviceID = bh.id
-            } else if let first = newDevs.first {
-                self.selectedOutputDeviceID = first.id
+            // The visible "NoNoise Mic" is INPUT-only, so it is NOT in the output-scoped allDevs.
+            // Detect install by translating the visible UID directly (translate resolves input-only devices too).
+            self.driverInstalled = self.deviceID(forUID: VirtualMicRouting.visibleDeviceUID) != 0
+            if let uid = VirtualMicRouting.preferredOutputUID(from: allDevs) {   // engine (output-capable), else BlackHole, else nil
+                self.selectedOutputDeviceID = uidToID[uid] ?? self.deviceID(forUID: uid)
             }
+            // else: no virtual sink → leave unset; do NOT auto-route to a physical output (that would
+            // play cleaned audio aloud instead of feeding a mic). Task 8's UI surfaces "install the driver".
         }
     }
     
@@ -352,6 +400,9 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         // But for "Microphone" input, that is what we want.
         
         var devs = session.devices
+        // Drop our own virtual mic from the capture list — selecting it as the source would feed
+        // the cleaned output back into the input (a loopback echo).
+        devs = devs.filter { VirtualMicRouting.filterInputs([$0.localizedName]).isEmpty == false }
         // Sort: Built-in first?
         devs.sort { $0.localizedName < $1.localizedName }
         
