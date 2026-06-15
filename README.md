@@ -151,7 +151,8 @@ Then:
 
 > Prebuilt releases will land on the [Releases page](https://github.com/ivalsaraj/NoNoise-Mac/releases) — ⭐ the repo to get notified.
 
-Maintainers publish prebuilt assets by pushing a `v*` tag that points to a commit on `main`. The
+Every successful `main` CI run publishes the latest Apple Silicon build with fixed asset names.
+Maintainers publish versioned releases by pushing a `v*` tag that points to a commit on `main`. The
 release workflow uploads zipped `NoNoiseMac.app`, `NoNoiseMacCLI`, `NoNoiseMic.driver`, and checksums.
 
 ## 🚀 Usage

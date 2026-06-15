@@ -71,11 +71,13 @@ Instruments/profiling, allocation checks, or an explicit before/after explanatio
 
 ## CI & releases
 `.github/workflows/ci.yml` runs on pushes to `main` and pull requests targeting `main`; it only
-builds and tests. `.github/workflows/release.yml` automatically updates the `stable` GitHub Release
-after CI succeeds on `main`, and also publishes versioned release assets for `v*` tags whose commit
-is contained in `origin/main` (or manual dispatch with such a tag). Stable assets use fixed names
-(`NoNoiseMac.app.zip`, `NoNoiseMacCLI`, `NoNoiseMic.driver.zip`, `SHA256SUMS`) so the release page
-always points at the latest successful `main` build; versioned releases use tag-specific filenames.
+builds and tests. `.github/workflows/release.yml` automatically publishes the latest successful
+`main` build as GitHub's **Latest** release using an immutable `main-<short-sha>` tag, and also
+publishes versioned release assets for `v*` tags whose commit is contained in `origin/main` (or
+manual dispatch with such a tag). Do NOT reintroduce a moving `stable` Git tag — `git pull --tags`
+rejects moved local tags and breaks normal sync. Stable assets use fixed names
+(`NoNoiseMac.app.zip`, `NoNoiseMacCLI`, `NoNoiseMic.driver.zip`, `SHA256SUMS`); versioned releases
+use tag-specific filenames.
 
 ## Entitlements & signing
 `bundle.sh` codesigns with `Resources/NoNoiseMac.entitlements`, kept **intentionally minimal** —

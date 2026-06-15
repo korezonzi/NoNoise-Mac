@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to create, for example v1.0.0 or stable"
+        description: "Release tag to create, for example v1.0.0 or stable-latest"
         required: true
         type: string
 
@@ -36,14 +36,15 @@ jobs:
           git fetch origin main --tags
 
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            TAG="stable"
             IS_STABLE=true
             git checkout "${{ github.event.workflow_run.head_sha }}"
+            TAG="main-$(git rev-parse --short=12 HEAD)"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ inputs.tag }}"
-            if [ "$TAG" = "stable" ]; then
+            if [ "$TAG" = "stable-latest" ]; then
               IS_STABLE=true
               git checkout origin/main
+              TAG="main-$(git rev-parse --short=12 HEAD)"
             else
               IS_STABLE=false
               git fetch --tags origin "$TAG"
@@ -66,6 +67,7 @@ jobs:
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "is_stable=$IS_STABLE" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Show Swift version
         run: swift --version
@@ -83,6 +85,7 @@ jobs:
         run: |
           TAG="${{ steps.release_target.outputs.tag }}"
           IS_STABLE="${{ steps.release_target.outputs.is_stable }}"
+          TARGET_SHA="${{ steps.release_target.outputs.target_sha }}"
           mkdir -p release-assets
           if [ "$IS_STABLE" = "true" ]; then
             ditto -c -k --keepParent NoNoiseMac.app "release-assets/NoNoiseMac.app.zip"
@@ -104,17 +107,17 @@ jobs:
           IS_STABLE="${{ steps.release_target.outputs.is_stable }}"
 
           if [ "$IS_STABLE" = "true" ]; then
-            git tag -f "$TAG" HEAD
-            git push origin "refs/tags/$TAG" --force
-
             if gh release view "$TAG" >/dev/null 2>&1; then
               gh release edit "$TAG" \
                 --title "NoNoise Mac stable" \
-                --notes "Latest successful Apple Silicon build from main. First launch may require right-click → Open because the app is ad-hoc signed."
+                --notes "Latest successful Apple Silicon build from main. First launch may require right-click → Open because the app is ad-hoc signed." \
+                --latest
             else
               gh release create "$TAG" \
                 --title "NoNoise Mac stable" \
-                --notes "Latest successful Apple Silicon build from main. First launch may require right-click → Open because the app is ad-hoc signed."
+                --notes "Latest successful Apple Silicon build from main. First launch may require right-click → Open because the app is ad-hoc signed." \
+                --target "$TARGET_SHA" \
+                --latest
             fi
 
             gh release upload "$TAG" release-assets/* --clobber

@@ -227,8 +227,13 @@ Metering & Loudness fields can be added without migration.
 
 ### 2026-06-15 — Stable release after successful main CI
 - Updated `.github/workflows/release.yml` so a successful `CI` workflow on `main` automatically
-  rebuilds, bundles, and uploads the latest `NoNoiseMac.app`, `NoNoiseMacCLI`, `NoNoiseMic.driver`,
-  and checksums to the `stable` GitHub Release. Versioned `v*` tag releases remain supported.
+  rebuilt, bundled, and uploaded the latest `NoNoiseMac.app`, `NoNoiseMacCLI`, `NoNoiseMic.driver`,
+  and checksums to a stable GitHub Release. Versioned `v*` tag releases remained supported.
+
+### 2026-06-15 — Stop moving the `stable` Git tag
+- Removed the release workflow's `git tag -f stable` / force-push path. Stable main builds now use
+  immutable `main-<short-sha>` tags and are marked as GitHub's **Latest** release, so developer
+  machines no longer hit `git pull --tags` conflicts from a moving local `stable` tag.
 
 ### 2026-06-15 — Apple Silicon performance mandate
 - Added an `AGENTS.md` rule requiring all future implementation work to optimize for M-series Macs:
