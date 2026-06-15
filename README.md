@@ -51,6 +51,9 @@ Everything happens **on your device**. Your audio never leaves your Mac.
 - **🎙️ Broadcast Voice** — a one-tap clarity lift (Off / Low / Medium / High) that adds studio presence and tames sibilance, so you sound clearer and more present while still sounding like *you*.
 - **🎧 Clean Incoming / Guest** — de-noise the *other* side too. Route a noisy guest or caller through a loopback device and NoNoise Mac cleans **what you hear** in real time with the same on-device AI — no cloud, no subscription.
 - **🫦 Mouth Noise** — an optional de-plosive (P-pop / B-thump suppressor) and de-click (lip-smack / mouth-click suppressor) stage (Off / Low / Medium / High). Both are identity at rest — only the artifact is removed, never the voice.
+- **⌨️ Global Hotkeys + Stream Deck** — system-wide hotkeys (user-configurable) for every
+  control action (toggle AI, A/B bypass, cycle preset, cycle Broadcast Voice, nudge gain), plus
+  a `nonoisemac://` URL scheme for Stream Deck "Open" actions or shell scripting.
 - **🛠️ Works everywhere** — any input (Built-in, USB, XLR via interface) → any app via a virtual cable.
 - **🟢 On by default** — launches actively cancelling noise; toggle from the menu bar anytime.
 - **💸 Free & open source** — MIT licensed.
@@ -78,6 +81,42 @@ Two targeted artifact suppressors that live after the de-esser in the chain:
 - **De-click**: tracks a fast envelope vs. a slow background RMS. When the fast/slow ratio spikes beyond `clickRatio` (6×), a brief (4 ms) gain reduction is applied. Normal speech never sustains this ratio.
 
 Both stages are **Off by default** and are **identity at rest** — verified by XCTest. They are orthogonal to Broadcast Voice and the noise preset.
+
+### ⌨️ Global Hotkeys + Stream Deck
+
+**Global hotkeys** (default combos use ⌃⌥ to avoid system-shortcut collisions):
+
+| Action | Default |
+|---|---|
+| Toggle Noise Cancellation | ⌃⌥N |
+| A/B Bypass (hold for raw) | ⌃⌥B |
+| A/B Bypass (toggle) | ⌃⌥⇧B |
+| Preset → Next | ⌃⌥] |
+| Preset → Previous | ⌃⌥[ |
+| Broadcast Voice → Next | ⌃⌥C |
+| Gain + | ⌃⌥= |
+| Gain − | ⌃⌥- |
+
+Rebind any hotkey in **Settings → Hotkeys**. If a combo is already in use by another app,
+NoNoise Mac shows a conflict warning and leaves that slot unregistered.
+
+**Stream Deck (no SDK required):** Use the Stream Deck "Open" action (or "Website" in Open
+mode) with one of these URLs:
+
+```
+nonoisemac://toggle
+nonoisemac://bypass
+nonoisemac://preset/next
+nonoisemac://preset/prev
+nonoisemac://clarity/next
+nonoisemac://gain/up
+nonoisemac://gain/down
+```
+
+Or from a terminal / shell script: `open nonoisemac://toggle` (or `NoNoiseMacCLI --action toggle`).
+
+**A/B Bypass:** Hold ⌃⌥B to momentarily hear the raw mic (useful for comparing before/after
+during a recording). Release to restore AI. ⌃⌥⇧B toggles bypass on/off persistently.
 
 ## 📥 Install
 

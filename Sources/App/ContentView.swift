@@ -4,11 +4,14 @@ import Core
 
 struct ContentView: View {
     @ObservedObject var audioModel: AudioModel
+    @ObservedObject var dispatcher: ActionDispatcher
+    @ObservedObject var hotkeyManager: HotkeyManager
 
     var body: some View {
         VStack(spacing: 14) {
             header
             statusCard
+            bypassBanner
             modeCard
             clarityCard
             incomingCard
@@ -17,6 +20,7 @@ struct ContentView: View {
             driverStatusRow
             footer
         }
+        .animation(.easeInOut(duration: 0.18), value: dispatcher.isBypassed)
         .padding(16)
         .frame(width: 320)
     }
@@ -36,7 +40,7 @@ struct ContentView: View {
             }
             Spacer()
             Button {
-                WindowManager.openSettings(model: audioModel)
+                WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager)
             } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 14))
@@ -76,10 +80,17 @@ struct ContentView: View {
                         .foregroundColor(on ? .green : .secondary)
                 }
                 Spacer()
-                Toggle("", isOn: $audioModel.isAIEnabled)
+                // Route through the dispatcher so a UI flip uses the SAME desired-vs-effective
+                // path as the toggle-AI hotkey, and disable it during bypass so the user can't
+                // re-enable AI processing against an active A/B bypass (finding #2).
+                Toggle("", isOn: dispatcher.aiToggleBinding)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .tint(.green)
+                    .disabled(dispatcher.isBypassed)
+                    .help(dispatcher.isBypassed
+                          ? "Disabled while A/B bypass is active — release bypass to change AI."
+                          : "Toggle Noise Cancellation")
             }
 
             HStack(spacing: 8) {
@@ -115,6 +126,26 @@ struct ContentView: View {
             }
         }
         .nnCard(highlighted: on)
+    }
+
+    // MARK: - A/B bypass banner
+
+    @ViewBuilder
+    private var bypassBanner: some View {
+        if dispatcher.isBypassed {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform.slash")
+                    .foregroundColor(.orange)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("A/B Bypass Active").font(.caption).fontWeight(.medium).foregroundColor(.orange)
+                    Text("Hearing raw mic — AI off while bypass is on.")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+            .nnCard()
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        }
     }
 
     // MARK: - Mode (presets)
@@ -256,7 +287,7 @@ struct ContentView: View {
     private var footer: some View {
         HStack(spacing: 8) {
             Button {
-                WindowManager.openSettings(model: audioModel)
+                WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager)
             } label: {
                 Label("Settings", systemImage: "slider.horizontal.3")
             }
@@ -340,9 +371,9 @@ extension View {
 class WindowManager {
     static var settingsWindow: NSWindow?
 
-    static func openSettings(model: AudioModel) {
+    static func openSettings(model: AudioModel, hotkeyManager: HotkeyManager) {
         if settingsWindow == nil {
-            let view = SettingsView(audioModel: model)
+            let view = SettingsView(audioModel: model, hotkeyManager: hotkeyManager)
             let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
                                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                 backing: .buffered, defer: false)
