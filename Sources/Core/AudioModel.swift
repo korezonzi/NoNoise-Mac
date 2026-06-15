@@ -150,6 +150,17 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         }
     }
 
+    /// Mouth-noise finisher level (de-plosive + de-click). Layered on top of the
+    /// active preset, independent of the noise preset, Voice Polish, and Broadcast
+    /// Voice. Guarded by `isApplyingPreset` like all other knobs.
+    @Published public var mouthNoiseLevel: MouthNoiseLevel = .off {
+        didSet {
+            guard !isApplyingPreset else { return }
+            applyVoiceChain()
+            persistSettings()
+        }
+    }
+
     /// App-level pre-DSP input trim (25%…100%). Does not write macOS hardware volume.
     private var realtimeInputVolume: Float = 1.0
 
@@ -199,6 +210,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         static let gain = "mv.outputGain"
         static let voicePolish = "mv.voicePolish"
         static let clarity = "mv.clarity"
+        static let mouthNoise = "mv.mouthNoise"
         static let inputVolume = "mv.inputVolume"
         static let smartLevel = "mv.smartLevel"
         static let incomingEnabled = "mv.incomingEnabled"
@@ -347,6 +359,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         var s = selectedPreset.voiceChain
         s.enabled = s.enabled && voicePolishEnabled
         s.clarity = clarityLevel
+        s.mouthNoiseLevel = mouthNoiseLevel
         voiceChain.configure(s)
     }
 
@@ -371,6 +384,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         d.set(outputGainValue, forKey: PrefKey.gain)
         d.set(voicePolishEnabled, forKey: PrefKey.voicePolish)
         d.set(clarityLevel.rawValue, forKey: PrefKey.clarity)
+        d.set(mouthNoiseLevel.rawValue, forKey: PrefKey.mouthNoise)
         d.set(inputVolumeValue, forKey: PrefKey.inputVolume)
         d.set(smartLevelEnabled, forKey: PrefKey.smartLevel)
     }
@@ -394,6 +408,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         // re-persist or reconfigure mid-load (default ON when absent).
         voicePolishEnabled = d.object(forKey: PrefKey.voicePolish) as? Bool ?? true
         clarityLevel = ClarityLevel(rawValue: d.string(forKey: PrefKey.clarity) ?? "") ?? .off
+        mouthNoiseLevel = MouthNoiseLevel(rawValue: d.string(forKey: PrefKey.mouthNoise) ?? "") ?? .off
         inputVolumeValue = d.object(forKey: PrefKey.inputVolume) != nil
             ? SmartLevelController.clampInputVolume(d.float(forKey: PrefKey.inputVolume)) : 1.0
         smartLevelEnabled = d.object(forKey: PrefKey.smartLevel) as? Bool ?? false

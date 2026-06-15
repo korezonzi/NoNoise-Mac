@@ -12,6 +12,7 @@ struct ContentView: View {
             modeCard
             clarityCard
             incomingCard
+            mouthNoiseCard
             devicesCard
             driverStatusRow
             footer
@@ -161,9 +162,25 @@ struct ContentView: View {
             if audioModel.incomingCleanupEnabled {
                 Text(audioModel.incomingSourceUID.isEmpty || audioModel.incomingOutputDeviceID == 0
                      ? "Pick a loopback source and output in Settings."
-                     : "Cleaning the guest you hear.")
+                    : "Cleaning the guest you hear.")
                     .font(.caption2).foregroundColor(.secondary)
             }
+        }
+        .nnCard()
+    }
+
+    // MARK: - Mouth Noise finishers
+
+    private var mouthNoiseCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            cardLabel("Mouth Noise", systemImage: "mouth.fill")
+            Picker("", selection: $audioModel.mouthNoiseLevel) {
+                ForEach(MouthNoiseLevel.allCases) { level in
+                    Text(level.label).tag(level)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
         }
         .nnCard()
     }

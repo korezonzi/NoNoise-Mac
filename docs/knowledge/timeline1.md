@@ -17,6 +17,15 @@ Chronological log of notable changes. Newest on top.
   cleans up the attached-but-idle state so playback-failure teardown is deterministic.
 - Verified via `swift build` + 89 unit tests green; live-audio paths remain manual smoke.
 
+### 2026-06-15 — Mouth-Noise Finishers (de-plosive + de-click) added
+- Added two new identity-at-rest `VoiceChain` stages after the de-esser: `DePlosive` (subtractive
+  low-band plosive gate, `out = x - frac * lowSig`) and `DeClick` (broadband transient gate,
+  `out = x * gain`). Both are pure value types in `Dynamics.swift`, gated by `MouthNoiseLevel`
+  (off/low/medium/high) carried on `VoiceChainSettings` and injected by
+  `AudioModel.applyVoiceChain()`. Persisted under `mv.mouthNoise`.
+- UI: segmented picker in Settings and the popover. Design invariant — identity at rest — enforced
+  structurally and proven by XCTest.
+
 ### 2026-06-15 — Hot mic ceiling fix
 - Input metering now reflects the trimmed NoNoise input signal instead of raw pre-trim RMS, so
   lowering Input Volume visibly lowers the meter while raw mic clipping still shows a separate
