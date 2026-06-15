@@ -6,7 +6,8 @@ import Foundation
 /// biquad coefficients (not RBJ approximations) so the meter reads true BS.1770
 /// loudness across the spectrum. Then: K-weighted mean-square over a sliding
 /// momentary window (400 ms). Mono measurement applies the standard −0.691 dB
-/// calibration offset. Integrated (gated) loudness is added in Task 2.
+/// calibration offset. Integrated loudness is gated (absolute −70 LUFS + relative
+/// −10 LU) over a fixed-size, pre-allocated block ring (no render-path allocation).
 ///
 /// Sample-peak is tracked alongside (NOT certified true-peak — see CONCEPTS.md;
 /// oversampled dBTP is deferred for the Apple-Silicon perf mandate).
