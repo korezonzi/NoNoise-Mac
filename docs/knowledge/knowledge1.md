@@ -5,6 +5,20 @@ for the must-read failure modes.
 
 ---
 
+### [GOTCHA] 2026-06-15 — AudioServerPlugIn silently fails to load (signature / CFPlugIn keys)
+- **Symptom:** `NoNoiseMic.driver` installed to `/Library/Audio/Plug-Ins/HAL` but "NoNoise Mic"
+  never appears as a device — and `coreaudiod` logs nothing obvious.
+- **Root cause:** `coreaudiod` **silently ignores** a HAL plug-in whose code signature is invalid
+  or whose `Info.plist` `CFPlugInFactories` / `CFPlugInTypes` keys are wrong (the type UUID must be
+  `443ABAB8-E7B3-491A-B985-BEB9187030DB` and the factory string must match the exported
+  `NoNoiseMic_Create` symbol). Editing the bundle **after** `codesign` also invalidates the
+  signature → silent non-load.
+- **Fix/Rule:** `build-driver.sh` signs **after** full assembly; `install-driver.sh` verifies via
+  `system_profiler SPAudioDataType | grep "NoNoise Mic"` and the app re-confirms by translating the
+  visible UID (`kAudioHardwarePropertyTranslateUIDToDevice`). Never edit a signed `.driver`; rebuild.
+- **Files:** `Driver/NoNoiseMic/NoNoiseMic.c`, `Driver/NoNoiseMic/Info.plist`, `build-driver.sh`,
+  `install-driver.sh`.
+
 ### [GOTCHA] 2026-06-15 — `allow-jit` entitlement is required for CoreML/Metal
 - `Resources/NoNoiseMac.entitlements` carries two keys: `com.apple.security.device.audio-input`
   (mic) and `com.apple.security.cs.allow-jit`. The latter is needed because DeepFilterNet3 runs on

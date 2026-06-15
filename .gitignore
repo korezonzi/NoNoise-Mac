@@ -11,6 +11,7 @@ configuration/registries/
 # Build outputs / artifacts
 NoNoiseMac.app/
 NoNoiseMacCLI
+NoNoiseMic.driver/
 *.zip
 
 # Scratch / local tooling

@@ -87,18 +87,44 @@ Then:
 
 ## 🚀 Usage
 
-NoNoise Mac sends **clean** audio into a **virtual audio cable**; your apps then listen to
-that cable. Install a free virtual cable like
-**[BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole)** first.
+### NoNoise Mic (virtual microphone) — recommended
+
+Build and install the bundled **NoNoise Mic** driver once, then any app can pick it directly —
+no BlackHole, no system-default juggling.
+
+```bash
+./build-driver.sh          # compile + ad-hoc sign NoNoiseMic.driver
+sudo ./install-driver.sh   # install to /Library/Audio/Plug-Ins/HAL, restart coreaudiod, verify
+```
+
+Installing restarts `coreaudiod`, so **all** audio drops for ~3 s. Then:
+
+1. **Launch** NoNoise Mac — the **waveform icon** appears in your menu bar.
+2. **Input** — set **Input Device** to your real microphone (Built-in, USB, etc.). Output is
+   **automatic**: the app routes cleaned audio to the hidden "NoNoise Mic Engine" — there is no
+   output device to choose.
+3. **Point your apps at the mic** — in Slack / Zoom / Meet / Discord / OBS, set the
+   **Microphone** to **NoNoise Mic**.
+4. **Pick a mode** — Meeting / Podcast / Tutorial, or fine-tune **Suppression Strength** and
+   **Reduction Limit** in Settings (this switches the mode to **Custom**).
+5. Noise cancellation is **ON by default**. Toggle it anytime from the menu bar. Remove the
+   driver later with `sudo ./uninstall-driver.sh`.
+
+> **Gatekeeper and driver-load are different checks.** The *app* is ad-hoc signed (right-click →
+> Open on first launch). The *driver* is loaded by `coreaudiod`, which **silently ignores** a
+> plug-in with an invalid signature — `install-driver.sh` verifies the device actually appeared.
+
+### Fallback: BlackHole virtual cable
+
+If you can't install the driver (e.g. a managed Mac), NoNoise Mac also works with a
+**[BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole)** virtual cable:
 
 1. **Launch** — find the **waveform icon** in your menu bar.
 2. **Input** — set **Input Device** to your real microphone (Built-in, USB, etc.).
 3. **Output** — set **Output Device** to **BlackHole 2ch** (the virtual cable).
 4. **Point your apps at the cable** — in Discord / Zoom / OBS, set the **Microphone** to
    **BlackHole 2ch**.
-5. **Pick a mode** — Meeting / Podcast / Tutorial, or fine-tune **Suppression Strength** and
-   **Reduction Limit** in Settings (this switches the mode to **Custom**).
-6. That's it — noise cancellation is **ON by default**. Toggle it anytime from the menu bar.
+5. **Pick a mode** and toggle as above — noise cancellation is **ON by default**.
 
 ## 💻 Advanced: dual pipelines (CLI)
 
