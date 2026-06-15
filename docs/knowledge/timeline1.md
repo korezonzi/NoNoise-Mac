@@ -7,6 +7,12 @@ Chronological log of notable changes. Newest on top.
   rebuilds, bundles, and uploads the latest `NoNoiseMac.app`, `NoNoiseMacCLI`, `NoNoiseMic.driver`,
   and checksums to the `stable` GitHub Release. Versioned `v*` tag releases remain supported.
 
+### 2026-06-15 — Apple Silicon performance mandate
+- Added an `AGENTS.md` rule requiring all future implementation work to optimize for M-series Macs:
+  low CPU, low memory churn, low latency, no avoidable battery drain, and no hot-path allocations or
+  polling without a measured reason. The rule explicitly preserves correctness, privacy, and audio
+  quality as non-negotiable while requiring measured, maintainable performance work.
+
 ### 2026-06-15 — NoNoise logo in menu bar and popover
 - Replaced the SF Symbol waveform used in the menu-bar item and popover status card with a shared
   NoNoise mark, so the visible app identity matches the NoNoise logo. The menu-bar variant uses a

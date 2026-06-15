@@ -52,6 +52,20 @@ builds are the optimized path for M-series chips.
 The app is a menu-bar utility (`LSUIElement`); **AI noise cancellation is ON by default**
 (`AudioModel.isAIEnabled = true`).
 
+## Apple Silicon performance mandate
+NoNoise Mac is an always-available menu-bar audio utility for M-series Macs. Every implementation
+decision MUST preserve that feel: low CPU, low memory churn, low latency, and no avoidable battery
+drain. Optimize for Apple Silicon first (`arm64`, CoreML/Metal/Accelerate where appropriate), and
+write high-performance code by default. Never introduce work that can noticeably slow down the
+user's Mac, pin the CPU/GPU, allocate in hot paths, poll unnecessarily, or keep hardware active
+without a measured reason.
+
+Performance does not outrank correctness, privacy, or audio quality. If a faster approach would
+reduce output quality, weaken privacy, or make behavior harder to reason about, do not take it.
+Instead, keep the quality bar and find a measured, maintainable optimization. Any non-trivial
+performance-sensitive change should be verified with the closest available signal: tests,
+Instruments/profiling, allocation checks, or an explicit before/after explanation.
+
 ## CI & releases
 `.github/workflows/ci.yml` runs on pushes to `main` and pull requests targeting `main`; it only
 builds and tests. `.github/workflows/release.yml` automatically updates the `stable` GitHub Release
