@@ -8,6 +8,7 @@ public final class AudioFileDenoiser {
         case modelNotReady
         case decodeFailed(String)
         case encodeFailed(String)
+        case unsupportedVideoContainer(String)
 
         public var description: String {
             switch self {
@@ -16,9 +17,13 @@ public final class AudioFileDenoiser {
             case .modelNotReady: return "Noise cancellation model did not finish loading."
             case .decodeFailed(let detail): return "Could not decode input audio: \(detail)"
             case .encodeFailed(let detail): return "Could not write output audio: \(detail)"
+            case .unsupportedVideoContainer(let ext):
+                return "Video containers such as .\(ext) are not supported in v1. Use an audio file or extract the audio track first."
             }
         }
     }
+
+    private static let rejectedVideoExtensions: Set<String> = ["mp4", "mov", "m4v", "mkv", "avi", "webm"]
 
     private static let targetSampleRate: Double = 48_000
     private static let chunkFrames: AVAudioFrameCount = 8192
@@ -29,6 +34,17 @@ public final class AudioFileDenoiser {
     /// Voice-chain settings for offline file mode (post-DFN polish).
     public static func voiceChainSettings(for preset: VoicePreset) -> VoiceChainSettings {
         preset.voiceChain
+    }
+
+    /// Temp path keeps the real audio extension so AVFoundation infers the container correctly.
+    static func temporaryOutputURL(for outputURL: URL) -> URL {
+        let directory = outputURL.deletingLastPathComponent()
+        let baseName = outputURL.deletingPathExtension().lastPathComponent
+        let ext = outputURL.pathExtension
+        if ext.isEmpty {
+            return directory.appendingPathComponent(".\(baseName).tmp")
+        }
+        return directory.appendingPathComponent(".\(baseName).tmp.\(ext)")
     }
 
     public func denoise(_ options: AudioDenoiseOptions,
@@ -43,8 +59,12 @@ public final class AudioFileDenoiser {
 
         let inputURL = URL(fileURLWithPath: options.inputPath)
         let outputURL = URL(fileURLWithPath: options.outputPath)
-        let tempOutputURL = outputURL.deletingLastPathComponent()
-            .appendingPathComponent(".\(outputURL.lastPathComponent).tmp")
+        let inputExt = inputURL.pathExtension.lowercased()
+        if Self.rejectedVideoExtensions.contains(inputExt) {
+            throw DenoiseError.unsupportedVideoContainer(inputExt)
+        }
+
+        let tempOutputURL = Self.temporaryOutputURL(for: outputURL)
 
         if fileManager.fileExists(atPath: tempOutputURL.path) {
             try fileManager.removeItem(at: tempOutputURL)
@@ -138,10 +158,7 @@ public final class AudioFileDenoiser {
 
             progress?(1.0)
 
-            if fileManager.fileExists(atPath: outputURL.path) {
-                try fileManager.removeItem(at: outputURL)
-            }
-            try fileManager.moveItem(at: tempOutputURL, to: outputURL)
+            try Self.commitTempOutput(at: tempOutputURL, to: outputURL, fileManager: fileManager)
         } catch let error as DenoiseError {
             try? fileManager.removeItem(at: tempOutputURL)
             throw error
@@ -206,5 +223,17 @@ public final class AudioFileDenoiser {
             throw DenoiseError.decodeFailed(conversionError?.localizedDescription ?? "Conversion failed.")
         }
         return outBuffer
+    }
+
+    static func commitTempOutput(at tempURL: URL, to outputURL: URL, fileManager: FileManager) throws {
+        if fileManager.fileExists(atPath: outputURL.path) {
+            do {
+                _ = try fileManager.replaceItemAt(outputURL, withItemAt: tempURL)
+            } catch {
+                throw DenoiseError.encodeFailed("Could not replace output file: \(error.localizedDescription)")
+            }
+        } else {
+            try fileManager.moveItem(at: tempURL, to: outputURL)
+        }
     }
 }

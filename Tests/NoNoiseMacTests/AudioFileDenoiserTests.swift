@@ -33,6 +33,28 @@ final class AudioFileDenoiserTests: XCTestCase {
         XCTAssertFalse(AudioFileDenoiser.voiceChainSettings(for: .meeting).enabled)
     }
 
+    func testTemporaryOutputURLPreservesAudioExtension() {
+        let output = URL(fileURLWithPath: "/tmp/clean.wav")
+        let temp = AudioFileDenoiser.temporaryOutputURL(for: output)
+        XCTAssertEqual(temp.lastPathComponent, ".clean.tmp.wav")
+    }
+
+    func testRejectsMp4VideoContainer() async throws {
+        let temp = FileManager.default.temporaryDirectory
+        let input = temp.appendingPathComponent("nonoise-video.mp4")
+        FileManager.default.createFile(atPath: input.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: input) }
+
+        let denoiser = AudioFileDenoiser()
+        let options = AudioDenoiseOptions(inputPath: input.path, outputPath: temp.appendingPathComponent("out.wav").path)
+        do {
+            try await denoiser.denoise(options)
+            XCTFail("expected unsupported video container")
+        } catch let error as AudioFileDenoiser.DenoiseError {
+            XCTAssertEqual(error, .unsupportedVideoContainer("mp4"))
+        }
+    }
+
     func testDenoisesGeneratedWavToOutputFile() async throws {
         let temp = FileManager.default.temporaryDirectory
         let input = temp.appendingPathComponent("nonoise-test-input.wav")

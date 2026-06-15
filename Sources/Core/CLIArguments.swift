@@ -112,6 +112,10 @@ public enum CLIArguments {
             throw ParseError.mixedModes
         }
 
+        if denoiseOutput != nil, denoiseInput == nil {
+            throw ParseError.missingValue("--denoise")
+        }
+
         if let actionVerb { return .action(actionVerb) }
         if let denoiseInput {
             guard let denoiseOutput else { throw ParseError.missingValue("--output") }

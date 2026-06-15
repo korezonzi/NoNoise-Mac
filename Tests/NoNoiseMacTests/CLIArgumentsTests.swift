@@ -79,6 +79,12 @@ final class CLIArgumentsTests: XCTestCase {
         }
     }
 
+    func testOutputWithoutDenoiseFails() {
+        XCTAssertThrowsError(try CLIArguments.parse(["NoNoiseMacCLI", "--output", "/tmp/clean.wav"])) { error in
+            XCTAssertEqual(error as? CLIArguments.ParseError, .missingValue("--denoise"))
+        }
+    }
+
     func testUnknownPresetFails() {
         XCTAssertThrowsError(try CLIArguments.parse([
             "NoNoiseMacCLI", "--denoise", "/tmp/noisy.wav", "--output", "/tmp/clean.wav", "--preset", "radio"
