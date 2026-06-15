@@ -152,8 +152,24 @@ Then:
 > Prebuilt releases will land on the [Releases page](https://github.com/ivalsaraj/NoNoise-Mac/releases) — ⭐ the repo to get notified.
 
 Every successful `main` CI run publishes the latest Apple Silicon build with fixed asset names.
-Maintainers publish versioned releases by pushing a `v*` tag that points to a commit on `main`. The
-release workflow uploads zipped `NoNoiseMac.app`, `NoNoiseMacCLI`, `NoNoiseMic.driver`, and checksums.
+
+### Publishing a versioned release
+
+To publish a new version (e.g., `1.2.0`), run:
+
+```bash
+./release.sh 1.2.0
+```
+
+This script:
+1. Updates the version in `Resources/Info.plist`
+2. Commits the version bump
+3. Creates a `v1.2.0` git tag
+4. Pushes to GitHub, which triggers the release workflow
+
+The workflow then builds optimized arm64 binaries and publishes assets (app, CLI, driver, checksums) to the [Releases page](https://github.com/ivalsaraj/NoNoise-Mac/releases).
+
+**Version format:** Use semantic versioning (`major.minor.patch`, e.g., `1.2.0`, `1.2.1`, `2.0.0`).
 
 ## 🚀 Usage
 
