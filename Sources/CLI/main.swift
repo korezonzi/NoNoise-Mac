@@ -51,9 +51,11 @@ case .action(let verb):
     print("Sent action '\(verb)' to NoNoise Mac.")
     exit(0)
 
-case .denoise:
-    print("Error: Offline audio denoise is not implemented yet.")
-    exit(1)
+case .denoise(let options):
+    Task {
+        await runDenoise(options)
+    }
+    RunLoop.main.run()
 
 case .live(let input, let output, let gain):
     let model = AudioModel()
@@ -80,4 +82,26 @@ case .live(let input, let output, let gain):
 
     print("AI Pipeline Active. Press Ctrl+C to stop.")
     RunLoop.main.run()
+}
+
+@MainActor
+func runDenoise(_ options: AudioDenoiseOptions) async {
+    print("Denoising: \(options.inputPath)")
+    print("Preset: \(options.preset.rawValue)")
+    print("Output: \(options.outputPath)")
+    do {
+        var lastPercent = -1
+        try await AudioFileDenoiser().denoise(options) { progress in
+            let percent = Int(progress * 100)
+            if percent != lastPercent, percent % 5 == 0 {
+                lastPercent = percent
+                print("Progress: \(percent)%")
+            }
+        }
+        print("Wrote cleaned audio: \(options.outputPath)")
+        exit(0)
+    } catch {
+        print("Error: \(error)")
+        exit(1)
+    }
 }
