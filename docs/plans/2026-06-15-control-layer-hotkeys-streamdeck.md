@@ -2445,3 +2445,32 @@ open NoNoiseMac.app  # install+open (or ./install-app.sh)
   `KeyCaptureView`, `RebindSheet`, `HotkeySettingsView` used consistently across tasks.
   `ControlReducer.reduce` returns `(state:, mutations:)` and ALL call sites (tests + adapter)
   destructure it. `HotkeyActionID` conforms to `Identifiable` in the UI task where needed.
+
+## Post-Implementation Amendments
+
+Applied after the post-implementation Codex code review (gpt-5.5, approved round 2). Each item
+below was a **plan gap** — the implementation followed the plan as written; the plan simply
+didn't constrain the area, so the review caught it. Recorded here so the plan stays an accurate
+learning artifact.
+
+- **[PLAN GAP] CLI verb→URL had no single source of truth (test-vs-runtime divergence).**
+  Task 7 added `ControlAction.from(cliVerb:)` to Core (tested) AND a separate `nonoisemac://`
+  URL string in the CLI's `main.swift`. The plan never required the CLI's *emitted URL* to derive
+  from the same canonical mapping the URL handler parses, so `main.swift` shipped a private
+  `urlStrings` dictionary that no test exercised — free to drift from `from(url:)`.
+  **Fix applied:** added `ControlAction.urlString` (Core) as the canonical URL emitter (nil for
+  hotkey-only momentary bypass); the CLI now resolves `--action` via `from(cliVerb:)` → `urlString`;
+  added a `testCLIVerbToURLRoundTrips()` round-trip test (verb → action → URL → action).
+  **Root cause:** the plan treated "parse a verb" and "emit a URL" as separate concerns instead of
+  one round-trippable contract. Future control-surface plans should require a single canonical
+  encoder + a round-trip test whenever a value is both parsed and emitted.
+
+- **[PLAN GAP] Hotkey registration error handling under-specified.**
+  The plan said failed registrations surface in `conflictedActions` for rebinding, but didn't
+  distinguish the expected conflict (`eventHotKeyExistsErr`, -9878) from unexpected `OSStatus`
+  failures, nor require logging the latter.
+  **Fix applied:** `HotkeyManager.register` now logs any non-`eventHotKeyExistsErr` status (so a
+  malformed key code isn't invisible) while still inserting every failure into `conflictedActions`.
+
+- **[IMPLEMENTATION, not plan] Unused `@State isListeningForKey`** in `HotkeySettingsView` was a
+  leftover from drafting; removed. Not a plan gap.
