@@ -33,6 +33,7 @@ struct GeneralSettingsView: View {
                 suppressionCard
                 inputVolumeCard
                 gainCard
+                loudnessCard
                 footer
             }
             .padding(.trailing, 2)
@@ -221,6 +222,37 @@ struct GeneralSettingsView: View {
                 }
                 .controlSize(.small)
             }
+        }
+        .nnCard()
+    }
+
+    // MARK: Loudness (LUFS) + normalization
+
+    private var loudnessCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                sectionHeader("Loudness", systemImage: "speaker.wave.2.circle.fill")
+                Spacer()
+                Text(audioModel.integratedLUFS <= LoudnessMeter.silenceLUFS + 1
+                     ? "— LUFS" : String(format: "%.1f LUFS", audioModel.integratedLUFS))
+                    .font(.callout).monospacedDigit().foregroundColor(.secondary)
+            }
+            Toggle(isOn: $audioModel.loudnessNormEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Normalize Loudness").font(.subheadline)
+                    Text("Gently rides gain toward a target level so you’re consistent across calls and recordings.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            Picker("Target", selection: $audioModel.loudnessTargetLUFS) {
+                Text("−14 LUFS (YouTube / Spotify)").tag(Float(-14))
+                Text("−16 LUFS (Apple Podcasts)").tag(Float(-16))
+            }
+            .pickerStyle(.menu)
+            .disabled(!audioModel.loudnessNormEnabled)
+            Text("Peak-safe: output is capped ~3 dB below clipping. Loudness is K-weighted (ITU-R BS.1770); peak is sample-peak, not certified true-peak.")
+                .font(.caption2).foregroundColor(.secondary)
         }
         .nnCard()
     }
