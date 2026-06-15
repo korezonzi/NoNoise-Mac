@@ -207,6 +207,11 @@ The identity-preserving de-esser. It isolates the sibilant band, follows its env
     }
 
     /// Loud sibilance is reduced (output high-band energy < input).
+    /// Probe at 10 kHz: representative of real "ess" sibilance and far enough above the
+    /// 6 kHz crossover that the subtractive band (`out = x − frac·sib`) is near-in-phase,
+    /// so the reduction is genuine. (A tone just above the crossover — e.g. 7.5 kHz — sees
+    /// a ~70° high-pass phase shift that mathematically caps subtractive cancellation near
+    /// ~6 %, so it cannot probe real attenuation regardless of `maxReductionDb`.)
     func testDeEsserReducesLoudSibilance() {
         var d = DeEsser()
         d.configure(crossoverHz: 6000, thresholdDb: -28, maxReductionDb: 8,
@@ -214,7 +219,7 @@ The identity-preserving de-esser. It isolates the sibilant band, follows its env
         var inSq: Float = 0, outSq: Float = 0
         let n = 9600, half = 4800
         for i in 0..<n {
-            let x = 0.8 * sinf(2 * Float.pi * 7500 * Float(i) / 48000) // loud, well above threshold
+            let x = 0.8 * sinf(2 * Float.pi * 10000 * Float(i) / 48000) // loud, well above threshold
             let y = d.process(x)
             if i >= half { inSq += x * x; outSq += y * y }
         }

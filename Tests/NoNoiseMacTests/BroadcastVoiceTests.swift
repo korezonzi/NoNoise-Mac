@@ -28,6 +28,65 @@ final class BroadcastVoiceTests: XCTestCase {
         XCTAssertEqual(r.outRMS / r.inRMS, 1.0, accuracy: 0.05, "low end must be essentially untouched")
     }
 
+    // MARK: - DeEsser
+
+    /// Disabled de-esser is a perfect identity for any sample.
+    func testDeEsserDisabledIsIdentity() {
+        var d = DeEsser()
+        d.configure(crossoverHz: 6000, thresholdDb: -28, maxReductionDb: 6,
+                    attackMs: 1, releaseMs: 80, sampleRate: 48000, enabled: false)
+        for x in [Float(0.0), 0.5, -0.73, 0.99] {
+            XCTAssertEqual(d.process(x), x, accuracy: 1e-7, "disabled de-esser must not alter samples")
+        }
+    }
+
+    /// Quiet sibilance (below threshold) passes through unchanged — voice stays original.
+    func testDeEsserQuietSibilancePasses() {
+        var d = DeEsser()
+        d.configure(crossoverHz: 6000, thresholdDb: -28, maxReductionDb: 6,
+                    attackMs: 1, releaseMs: 80, sampleRate: 48000, enabled: true)
+        var maxDelta: Float = 0
+        for i in 0..<9600 {
+            let x = 0.02 * sinf(2 * Float.pi * 7000 * Float(i) / 48000) // ~ -34 dB, below -28 dB
+            maxDelta = max(maxDelta, abs(d.process(x) - x))
+        }
+        XCTAssertLessThan(maxDelta, 1e-4, "below-threshold sibilance must pass unchanged")
+    }
+
+    /// Loud sibilance is reduced (output high-band energy < input).
+    /// Probe at 10 kHz: representative of real "ess" sibilance and far enough above the
+    /// 6 kHz crossover that the subtractive band (`out = x − frac·sib`) is near-in-phase,
+    /// so the reduction is genuine. (A tone just above the crossover — e.g. 7.5 kHz — sees
+    /// a ~70° high-pass phase shift that mathematically caps subtractive cancellation near
+    /// ~6 %, so it cannot probe real attenuation regardless of `maxReductionDb`.)
+    func testDeEsserReducesLoudSibilance() {
+        var d = DeEsser()
+        d.configure(crossoverHz: 6000, thresholdDb: -28, maxReductionDb: 8,
+                    attackMs: 1, releaseMs: 80, sampleRate: 48000, enabled: true)
+        var inSq: Float = 0, outSq: Float = 0
+        let n = 9600, half = 4800
+        for i in 0..<n {
+            let x = 0.8 * sinf(2 * Float.pi * 10000 * Float(i) / 48000) // loud, well above threshold
+            let y = d.process(x)
+            if i >= half { inSq += x * x; outSq += y * y }
+        }
+        XCTAssertLessThan(sqrtf(outSq / Float(half)), sqrtf(inSq / Float(half)) * 0.85,
+                          "loud sibilance must be attenuated")
+    }
+
+    /// Loud LOW-frequency content (vocal body) is untouched even with the de-esser ON.
+    func testDeEsserPreservesVoiceBody() {
+        var d = DeEsser()
+        d.configure(crossoverHz: 6000, thresholdDb: -28, maxReductionDb: 8,
+                    attackMs: 1, releaseMs: 80, sampleRate: 48000, enabled: true)
+        var maxDelta: Float = 0
+        for i in 0..<9600 {
+            let x = 0.8 * sinf(2 * Float.pi * 200 * Float(i) / 48000) // loud, but below the sib band
+            maxDelta = max(maxDelta, abs(d.process(x) - x))
+        }
+        XCTAssertLessThan(maxDelta, 1e-3, "the de-esser must not touch the vocal body")
+    }
+
     // MARK: - Helpers
 
     /// Drive a steady sine through a biquad; return input/steady-state output RMS
