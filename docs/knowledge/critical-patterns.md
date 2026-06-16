@@ -53,6 +53,19 @@ hard rules; the full rationale is in `AGENTS.md`.
 - **Why:** `objectWillChange` on an app-wide model fans out to EVERY observer, including the
   always-mounted Scene/label; at 25 Hz that starves the run loop and the failure is silent (perf, not correctness).
 
+## [PATTERN] A redesign spec MUST carry over or replace the docs update task from the plan it supersedes
+- **Source:** README omission after tap-based Clean Incoming rewrite, 2026-06-16.
+- **Symptom:** README still described the old BlackHole setup steps after the feature shipped.
+- **Root cause:** The original plan had an explicit `README.md` update task for the BlackHole approach.
+  The tap-based redesign spec replaced all implementation tasks but never rewrote or carried over
+  the docs step. The agent implemented against the spec and the README update silently fell through.
+- ❌ **WRONG:** Write a redesign spec that says "rewrite X" and assume the docs step carries over implicitly.
+- ✅ **CORRECT:** Any spec or plan that supersedes a prior plan MUST include an explicit checklist item
+  for updating every user-facing doc that describes the superseded behavior (README, CONCEPTS.md, AGENTS.md).
+  If the new spec has no docs task, add one before implementation starts.
+- **Why:** 8-FOLD AWARENESS requires a docs pass after every code change, but that only works if the
+  docs step is explicitly in the plan. Without a checklist item, it is silently skipped.
+
 ## [PATTERN] Transient suppressors gate on a TIME-LOCAL change, never a steady band-ratio
 - **Source:** `docs/knowledge/knowledge1.md`, 2026-06-15 ([CORRECTION]).
 - **Where:** `Sources/Core/AudioProcessing/Dynamics.swift` (`DePlosive`, `DeClick`).
