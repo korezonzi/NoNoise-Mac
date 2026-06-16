@@ -172,9 +172,16 @@ jobs:
 
             gh release upload "$TAG" release-assets/* --clobber
           else
-            gh release create "$TAG" release-assets/* \
-              --title "NoNoise Mac $TAG" \
-              --notes-file /tmp/release-notes.md
+            # Idempotent: re-running a versioned release (e.g. workflow_dispatch retry) must update
+            # the existing release, not fail with "release already exists".
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" release-assets/* --clobber
+              gh release edit "$TAG" --title "NoNoise Mac $TAG" --notes-file /tmp/release-notes.md
+            else
+              gh release create "$TAG" release-assets/* \
+                --title "NoNoise Mac $TAG" \
+                --notes-file /tmp/release-notes.md
+            fi
           fi
 
       - name: Generate, verify & publish Sparkle appcast
