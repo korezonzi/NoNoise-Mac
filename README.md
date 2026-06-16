@@ -4,7 +4,7 @@
 
   # NoNoise Mac
 
-  ### Real-time, on-device AI noise cancellation for macOS
+  ### Real-time, on-device AI noise cancellation for macOS — free Krisp alternative
 
   Silence keyboards, fans, traffic, and room echo on **any** mic, in **every** app —
   processed entirely on your Apple Silicon Neural Engine. No cloud. No subscription. No lag.
