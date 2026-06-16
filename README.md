@@ -13,7 +13,7 @@
   [![Platform](https://img.shields.io/badge/macOS-Apple%20Silicon-black.svg?style=flat-square&logo=apple)](https://www.apple.com/mac/)
   [![On-device](https://img.shields.io/badge/Privacy-100%25%20On--Device-2ea44f?style=flat-square&logo=shield)](#-privacy)
   [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
-  [![Size](https://img.shields.io/badge/Size-7%20MB-lightgrey?style=flat-square)](https://github.com/ivalsaraj/NoNoise-Mac/releases/latest)
+  [![Size](https://img.shields.io/badge/Size-7%20MB-2ea44f?style=flat-square)](https://github.com/ivalsaraj/NoNoise-Mac/releases/latest)
   [![CI](https://github.com/ivalsaraj/NoNoise-Mac/actions/workflows/ci.yml/badge.svg)](https://github.com/ivalsaraj/NoNoise-Mac/actions/workflows/ci.yml)
 
   <a href="#-install"><b>Install</b></a> ·
