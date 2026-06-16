@@ -5,6 +5,26 @@ for the must-read failure modes.
 
 ---
 
+### [GOTCHA] 2026-06-16 — Versioned-release CI: tag-clobber + appcast tag-create 403 (@ivalsaraj)
+- **Problem**: The 2nd versioned release (v1.3.0) failed twice. (1) "Resolve release target" died on
+  `git fetch origin main --tags` with "would clobber existing tag" — v1.2.0 was the 1st release so it
+  never hit this. (2) Then the appcast generated + EdDSA-signed fine but failed to PUBLISH with
+  `HTTP 403: Resource not accessible by integration` while creating the new `appcast` release.
+- **Root Cause**: (1) `git fetch --tags` refuses to update a tag ref CI's checkout already holds
+  without `--force`. (2) Repo `default_workflow_permissions=read`; the workflow elevates
+  `contents: write`, which is enough to create a release for an EXISTING tag (v1.3.0, pushed by
+  release.sh) but NOT to create the brand-new `appcast` git tag → 403.
+- **Fix**: (a) `git fetch --force origin main --tags` (+ the dispatch-branch fetch) — forcing also
+  guarantees the ANNOTATED tag object so release notes extract. (b) Bootstrapped the `appcast`
+  release+tag once with an admin token (`gh release create appcast --latest=false`); CI now only
+  `gh release upload appcast --clobber` (never creates the tag). (c) Made the versioned publish
+  idempotent (view → upload+edit, else create) so `workflow_dispatch` retries don't collide.
+- **Rule**: The `appcast` release must be bootstrapped once by a repo admin — CI's `GITHUB_TOKEN`
+  can upload to it but cannot create its tag. Re-trigger a stuck versioned release with
+  `gh workflow run release.yml -f tag=vX.Y.Z` (runs the fixed workflow from main, builds the tag's
+  source via the dispatch branch's `git checkout "$TAG"`).
+- **Files**: .github/workflows/release.yml
+
 ### [DECISION] 2026-06-15 — Sparkle auto-updater + monotonic CFBundleVersion (@ivalsaraj)
 - **Problem**: No update mechanism; wanted Voquill-style "update available" for a native Swift menu-bar app.
 - **Root Cause**: Voquill is Tauri (plugin-updater) — not portable; the native macOS equivalent is Sparkle. Also: release.sh's CFBundleVersion formula (MAJOR.MINOR digits) ignored PATCH and wasn't monotonic, which breaks Sparkle's version comparison.

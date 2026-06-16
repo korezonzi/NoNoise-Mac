@@ -2,6 +2,22 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-16 — Released v1.3.0; fixed the versioned-release CI pipeline (Valsaraj)
+- Cut **v1.3.0** (build 1003000) — first release carrying the Sparkle auto-updater AND the one-click
+  `.pkg`. Notes: auto-updates + one-click installer.
+- **CI bug 1 (tag clobber):** the 2nd versioned release failed at "Resolve release target" —
+  `git fetch --tags` won't re-fetch a tag CI already holds without `--force`. Fixed with `--force`
+  (also yields the annotated tag → correct release notes).
+- **CI bug 2 (appcast 403):** the appcast generated + signed fine but couldn't publish — the token
+  (repo default `read`, workflow `contents: write`) can create a release for an existing tag but not
+  the new `appcast` tag. Bootstrapped the `appcast` release once with an admin token; CI now only
+  `upload --clobber`s. See knowledge1.md.
+- **CI bug 3:** made the versioned publish idempotent so `workflow_dispatch` retries don't collide.
+- **Updater verified (server-side):** live appcast at the `SUFeedURL` advertises 1.3.0 / build
+  1003000, EdDSA-signed, enclosure → a downloadable 7.2 MB v1.3.0 app zip. Client test path: install
+  the pre-bump stable build (1.2.0 / build 2, Sparkle-embedded) → Check for Updates → offers 1.3.0.
+- **Files**: .github/workflows/release.yml
+
 ### 2026-06-16 — One-click `.pkg` installer (app + driver) + README demo video (Valsaraj)
 - **Why:** release-download users had no way to install the virtual-mic driver — the README told
   them to run `sudo ./install-driver.sh`, a script that ships only in the cloned repo, not in the
