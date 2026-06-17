@@ -52,6 +52,24 @@ public enum VoicePreset: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
+    /// Broadcast Voice level applied when this preset is selected.
+    /// `nil` means "leave the user's current clarity level unchanged".
+    public var defaultClarityLevel: ClarityLevel? {
+        switch self {
+        case .tutorial: return .low
+        default:        return nil
+        }
+    }
+
+    /// Voice Polish toggle applied when this preset is selected.
+    /// `nil` means "leave the user's current toggle unchanged".
+    public var defaultVoicePolish: Bool? {
+        switch self {
+        case .tutorial: return false
+        default:        return nil
+        }
+    }
+
     /// Voice-polish chain settings for this preset (independent of `parameters`).
     /// Values are tunable starting points.
     public var voiceChain: VoiceChainSettings {

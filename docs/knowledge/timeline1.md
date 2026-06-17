@@ -2,6 +2,14 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-17 — Tutorial preset tuned: Broadcast Voice low + Voice Polish off (@Valsaraj)
+- **What:** Tutorial preset now also applies `clarityLevel = .low` (Broadcast Voice) and
+  `voicePolishEnabled = false` (Voice Polish) when selected. Added `defaultClarityLevel: ClarityLevel?`
+  and `defaultVoicePolish: Bool?` to `VoicePreset`; `applyPreset` applies them when non-nil.
+- **Why:** User-validated: Broadcast Voice Low adds gentle presence without over-processing;
+  Voice Polish off avoids unnecessary chain overhead for screen-recording use.
+- **Files:** `Sources/Core/VoicePreset.swift`, `Sources/Core/AudioModel.swift`
+
 ### 2026-06-16 — Tutorial preset tuned: reduction limit 70 dB + input volume 70% (@Valsaraj)
 - **What:** Tutorial preset `attenuationLimitDb` changed from `maxAttenuationDb` (100, unlimited) to
   `70.0` dB. Added `VoicePreset.defaultInputVolume: Float?` — returns `0.70` for `.tutorial`, `nil`

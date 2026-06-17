@@ -400,6 +400,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         if let vol = preset.defaultInputVolume {
             inputVolumeValue = SmartLevelController.clampInputVolume(vol)
         }
+        if let clarity = preset.defaultClarityLevel {
+            clarityLevel = clarity
+        }
+        if let polish = preset.defaultVoicePolish {
+            voicePolishEnabled = polish
+        }
         isApplyingPreset = previously
         // Persistence is the caller's responsibility (selectedPreset.didSet), so a
         // direct .custom selection — which no-ops here — is still persisted.
