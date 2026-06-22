@@ -50,4 +50,20 @@ final class VirtualMicRoutingTests: XCTestCase {
         XCTAssertFalse(filtered.contains(VirtualMicRouting.visibleDeviceName))
         XCTAssertEqual(filtered, ["Built-in Microphone", "USB Mic"])
     }
+
+    func testHardwareRefreshRepinsEngineEvenWhenSelectedIDIsUnchanged() {
+        XCTAssertTrue(VirtualMicRouting.shouldRepinPlaybackAfterHardwareRefresh(
+            preferredRouteUID: VirtualMicRouting.engineDeviceUID,
+            previousOutputDeviceID: 75,
+            resolvedOutputDeviceID: 75
+        ))
+    }
+
+    func testHardwareRefreshDoesNotForceRepinForBlackHoleWhenSelectedIDIsUnchanged() {
+        XCTAssertFalse(VirtualMicRouting.shouldRepinPlaybackAfterHardwareRefresh(
+            preferredRouteUID: "BlackHoleUID",
+            previousOutputDeviceID: 12,
+            resolvedOutputDeviceID: 12
+        ))
+    }
 }

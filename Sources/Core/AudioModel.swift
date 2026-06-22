@@ -807,8 +807,17 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             // Detect install by translating the visible UID directly (translate resolves input-only devices too).
             self.driverInstalled = self.deviceID(forUID: VirtualMicRouting.visibleDeviceUID) != 0
             if let uid = routeUID {
-                self.selectedOutputDeviceID = uidToID[uid] ?? self.deviceID(forUID: uid)
+                let previousOutputDeviceID = self.selectedOutputDeviceID
+                let resolvedRouteID = uidToID[uid] ?? self.deviceID(forUID: uid)
+                self.selectedOutputDeviceID = resolvedRouteID
                 if uid == VirtualMicRouting.engineDeviceUID { self.activeOutputDeviceName = VirtualMicRouting.engineDeviceName }
+                if VirtualMicRouting.shouldRepinPlaybackAfterHardwareRefresh(
+                    preferredRouteUID: uid,
+                    previousOutputDeviceID: previousOutputDeviceID,
+                    resolvedOutputDeviceID: resolvedRouteID
+                ) {
+                    self.setupPlaybackEngine()
+                }
             }
             // else: no virtual sink → leave unset; do NOT auto-route to a physical output (that would
             // play cleaned audio aloud instead of feeding a mic). Task 8's UI surfaces "install the driver".
@@ -825,12 +834,16 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         if selectedOutputDeviceID != 0 {
              var deviceID = selectedOutputDeviceID
              let size = UInt32(MemoryLayout<AudioObjectID>.size)
-             AudioUnitSetProperty(outputNode.audioUnit!,
-                                  kAudioOutputUnitProperty_CurrentDevice,
-                                  kAudioUnitScope_Global,
-                                  0,
-                                  &deviceID,
-                                  size)
+             let status = AudioUnitSetProperty(outputNode.audioUnit!,
+                                               kAudioOutputUnitProperty_CurrentDevice,
+                                               kAudioUnitScope_Global,
+                                               0,
+                                               &deviceID,
+                                               size)
+             guard status == noErr else {
+                 errorMessage = "Could not route audio to NoNoise Mic. Restart NoNoise or reconnect the audio device."
+                 return
+             }
              
              // Update Name
              if let dev = outputDevices.first(where: { $0.id == selectedOutputDeviceID }) {

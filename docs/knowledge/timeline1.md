@@ -2,6 +2,21 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-06-22 — Repin NoNoise Mic Engine after hardware churn (Codex)
+- **What:** Added a tested `VirtualMicRouting.shouldRepinPlaybackAfterHardwareRefresh` predicate and
+  wired `AudioModel.fetchOutputDevices()` to explicitly rebuild the playback graph when a hardware
+  refresh re-resolves the hidden `NoNoise Mic Engine` to the same `AudioObjectID`. Previously that
+  unchanged ID bypassed `selectedOutputDeviceID.didSet`, so `setupPlaybackEngine()` did not rerun.
+- **Why:** After Bluetooth/headset connect-disconnect churn, the NoNoise meter could still move while
+  recorder apps saw silence from `NoNoise Mic`. Killing both NoNoise Mac and `coreaudiod` restored
+  output, pointing at stale CoreAudio route state between DSP output and the virtual mic driver.
+- **Safety:** The fix is limited to the hidden engine route; unchanged BlackHole fallback routes do
+  not force a rebuild. Route-pin failures now surface a recoverable error instead of silently running
+  an unpinned graph. Manual Bluetooth churn remains the on-device validation gate.
+- **Tests:** `swift test --filter VirtualMicRoutingTests`; full `swift test` before commit.
+- **Files:** `Sources/Core/AudioProcessing/VirtualMicRouting.swift`, `Sources/Core/AudioModel.swift`,
+  `Tests/NoNoiseMacTests/VirtualMicRoutingTests.swift`.
+
 ### 2026-06-17 — Tutorial preset tuned: Broadcast Voice low + Voice Polish off (@Valsaraj)
 - **What:** Tutorial preset now also applies `clarityLevel = .low` (Broadcast Voice) and
   `voicePolishEnabled = false` (Voice Polish) when selected. Added `defaultClarityLevel: ClarityLevel?`

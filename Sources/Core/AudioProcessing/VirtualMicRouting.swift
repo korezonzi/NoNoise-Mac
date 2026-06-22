@@ -57,6 +57,16 @@ public enum VirtualMicRouting {
         devices.filter(isSelectableOutput)
     }
 
+    public static func shouldRepinPlaybackAfterHardwareRefresh(
+        preferredRouteUID: String?,
+        previousOutputDeviceID: UInt32,
+        resolvedOutputDeviceID: UInt32
+    ) -> Bool {
+        preferredRouteUID == engineDeviceUID &&
+        resolvedOutputDeviceID != 0 &&
+        resolvedOutputDeviceID == previousOutputDeviceID
+    }
+
     /// Remove the virtual mic from a list of input device names (prevents a
     /// feedback loop if the user could otherwise select it as the capture source).
     public static func filterInputs(_ names: [String]) -> [String] {
