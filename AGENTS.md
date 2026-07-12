@@ -29,10 +29,14 @@ cable so any app (Zoom, Meet, Discord, OBS, …) receives studio-clean audio.
   - `VoicePreset` — preset → DSP params + voice-chain settings (single source of truth).
   - `CLIArguments` + `AudioDenoiseOptions` — shared CLI parser (live device, `--action`, `--denoise`).
   - `AudioFileDenoiser` — offline file decode → mono 48 kHz → `DeepFilterNetDSP` → optional `VoiceChain` → write WAV/CAF/etc. Waits on `DeepFilterNetDSP.waitUntilReady()` before processing; writes to a temp sibling then moves on success.
-- `Sources/App` — SwiftUI menu-bar app: `NoNoiseMacApp`, `ContentView` (popover), `SettingsView`.
+- `Sources/App` — SwiftUI menu-bar app: `NoNoiseMacApp`, `ContentView` (popover), `SettingsView`, and `LaunchAtLoginManager` (macOS Service Management adapter).
 - `Sources/CLI` — `NoNoiseMacCLI`: live device pipeline, one-shot `--action` URL dispatch, and `--denoise` offline file mode (audio containers only — no MP4/video remux in v1).
 - `Resources` — `DeepFilterNet3_Streaming.mlmodelc`, `AppIcon.icns`, `NoNoiseMacLogo.png`, `Info.plist`, `NoNoiseMac.entitlements`.
 - `Tests/NoNoiseMacTests` — pure DSP / preset / voice-chain unit tests (run headless).
+
+Launch at Startup uses macOS `SMAppService.mainApp` as the system-owned source of truth. It does
+not duplicate state in `UserDefaults`, create a LaunchAgent/helper, or add an entitlement; the
+setting works only when the installed app is running as a bundled application.
 
 ## Build, run, test
 ```bash

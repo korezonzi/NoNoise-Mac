@@ -71,6 +71,7 @@ Everything happens **on your device**. Your audio never leaves your Mac.
 - **🔒 100% private** — fully on-device on the Neural Engine; nothing is uploaded, ever.
 - **🎛️ One-click modes** — Meeting, Podcast, Tutorial, or Custom, with strength + tone control.
 - **↩️ Safe reset** — restore audio/device settings to defaults from Settings without deleting saved Voice Profiles or custom Hotkeys.
+- **🚀 Launch at Startup** — open **Settings → General → Launch at Startup** to start the menu-bar app automatically when you log in. The setting is off by default and requires the bundled app; if macOS asks for approval, enable NoNoise Mac under **System Settings → General → Login Items**.
 - **🎙️ Broadcast Voice** — a one-tap clarity lift (Off / Low / Medium / High) that adds studio presence and tames sibilance, so you sound clearer and more present while still sounding like *you*.
 - **🎧 Clean Incoming / Guest** — de-noise the *other* side too. NoNoise Mac captures all system audio via a native macOS process tap (no loopback device or BlackHole required) and cleans **what you hear** in real time with the same on-device AI — no cloud, no subscription. Requires macOS 14.4+.
 - **🫦 Mouth Noise** — an optional de-plosive (P-pop / B-thump suppressor) and de-click (lip-smack / mouth-click suppressor) stage (Off / Low / Medium / High). Both are identity at rest — only the artifact is removed, never the voice.
