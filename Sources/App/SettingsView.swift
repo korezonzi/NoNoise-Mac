@@ -6,10 +6,11 @@ struct SettingsView: View {
     @ObservedObject var audioModel: AudioModel
     @ObservedObject var hotkeyManager: HotkeyManager
     @ObservedObject var updaterController: UpdaterController
+    @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
 
     var body: some View {
         TabView {
-            GeneralSettingsView(audioModel: audioModel, meterModel: audioModel.meterModel, updaterController: updaterController)
+            GeneralSettingsView(audioModel: audioModel, meterModel: audioModel.meterModel, updaterController: updaterController, launchAtLoginManager: launchAtLoginManager)
                 .tabItem {
                     Label("General", systemImage: "slider.horizontal.3")
                 }
@@ -37,6 +38,7 @@ struct GeneralSettingsView: View {
     // MeterModel — observe it so the Settings readouts stay live while the popover is closed.
     @ObservedObject var meterModel: MeterModel
     @ObservedObject var updaterController: UpdaterController
+    @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
 
     @State private var isShowingSaveSheet = false
     @State private var newProfileName: String = ""

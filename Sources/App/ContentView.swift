@@ -7,6 +7,7 @@ struct ContentView: View {
     @ObservedObject var dispatcher: ActionDispatcher
     @ObservedObject var hotkeyManager: HotkeyManager
     @ObservedObject var updaterController: UpdaterController
+    @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
 
     var body: some View {
         VStack(spacing: 14) {
@@ -46,7 +47,7 @@ struct ContentView: View {
             }
             Spacer()
             Button {
-                WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager, updaterController: updaterController)
+                WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager, updaterController: updaterController, launchAtLoginManager: launchAtLoginManager)
             } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 14))
@@ -274,7 +275,7 @@ struct ContentView: View {
     private var footer: some View {
         HStack(spacing: 8) {
             Button {
-                WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager, updaterController: updaterController)
+                WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager, updaterController: updaterController, launchAtLoginManager: launchAtLoginManager)
             } label: {
                 Label("Settings", systemImage: "slider.horizontal.3")
             }
@@ -440,12 +441,13 @@ extension View {
 
 // MARK: - Settings window
 
+@MainActor
 class WindowManager {
     static var settingsWindow: NSWindow?
 
-    static func openSettings(model: AudioModel, hotkeyManager: HotkeyManager, updaterController: UpdaterController) {
+    static func openSettings(model: AudioModel, hotkeyManager: HotkeyManager, updaterController: UpdaterController, launchAtLoginManager: LaunchAtLoginManager) {
         if settingsWindow == nil {
-            let view = SettingsView(audioModel: model, hotkeyManager: hotkeyManager, updaterController: updaterController)
+            let view = SettingsView(audioModel: model, hotkeyManager: hotkeyManager, updaterController: updaterController, launchAtLoginManager: launchAtLoginManager)
             let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 460),
                                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                 backing: .buffered, defer: false)
@@ -472,6 +474,7 @@ class WindowManager {
                 model?.endMeterObservation(.settings)
             }
         }
+        launchAtLoginManager.refresh()
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
