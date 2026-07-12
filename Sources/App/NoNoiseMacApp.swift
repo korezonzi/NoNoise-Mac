@@ -14,6 +14,7 @@ struct NoNoiseMacApp: App {
     @StateObject private var dispatcher: ActionDispatcher
     @StateObject private var hotkeyManager: HotkeyManager
     @StateObject private var updaterController: UpdaterController
+    @StateObject private var launchAtLoginManager: LaunchAtLoginManager
 
     init() {
         // Init order matters: AudioModel → ActionDispatcher(model:) → HotkeyManager(dispatcher:).
@@ -29,6 +30,8 @@ struct NoNoiseMacApp: App {
         // to the AppDelegate so it can fire one prompt background check in didFinishLaunching.
         let updater = UpdaterController()
         _updaterController = StateObject(wrappedValue: updater)
+        let launchAtLogin = LaunchAtLoginManager()
+        _launchAtLoginManager = StateObject(wrappedValue: launchAtLogin)
 
         // Hand the dispatcher to the AppDelegate at LAUNCH (finding #3) — NOT in
         // ContentView.onAppear. A MenuBarExtra's content view isn't instantiated until the
@@ -43,7 +46,7 @@ struct NoNoiseMacApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            ContentView(audioModel: audioModel, dispatcher: dispatcher, hotkeyManager: hotkeyManager, updaterController: updaterController)
+            ContentView(audioModel: audioModel, dispatcher: dispatcher, hotkeyManager: hotkeyManager, updaterController: updaterController, launchAtLoginManager: launchAtLoginManager)
         } label: {
             Image(nsImage: NoNoiseLogoImage.menuBar(isActive: audioModel.isAIEnabled))
         }

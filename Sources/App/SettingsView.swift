@@ -6,10 +6,11 @@ struct SettingsView: View {
     @ObservedObject var audioModel: AudioModel
     @ObservedObject var hotkeyManager: HotkeyManager
     @ObservedObject var updaterController: UpdaterController
+    @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
 
     var body: some View {
         TabView {
-            GeneralSettingsView(audioModel: audioModel, meterModel: audioModel.meterModel, updaterController: updaterController)
+            GeneralSettingsView(audioModel: audioModel, meterModel: audioModel.meterModel, updaterController: updaterController, launchAtLoginManager: launchAtLoginManager)
                 .tabItem {
                     Label("General", systemImage: "slider.horizontal.3")
                 }
@@ -37,6 +38,7 @@ struct GeneralSettingsView: View {
     // MeterModel — observe it so the Settings readouts stay live while the popover is closed.
     @ObservedObject var meterModel: MeterModel
     @ObservedObject var updaterController: UpdaterController
+    @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
 
     @State private var isShowingSaveSheet = false
     @State private var newProfileName: String = ""
@@ -48,6 +50,7 @@ struct GeneralSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 brandedHeader
+                launchAtStartupCard
                 suppressionCard
                 inputVolumeCard
                 profilesCard
@@ -88,6 +91,48 @@ struct GeneralSettingsView: View {
         NoNoiseLogoAsset()
         .frame(width: 40, height: 40)
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private var launchAtStartupCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: Binding(
+                get: { launchAtLoginManager.isEnabled },
+                set: { launchAtLoginManager.setEnabled($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Launch at Startup")
+                        .font(.subheadline)
+                    Text("Start NoNoise Mac automatically when you log in to your Mac.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            if launchAtLoginManager.state == .requiresApproval {
+                loginItemsGuidance("macOS requires approval in System Settings > General > Login Items.")
+            } else if launchAtLoginManager.state == .notFound {
+                loginItemsGuidance("Launch at Startup works when NoNoise Mac is running as a bundled app.")
+            }
+            if let errorMessage = launchAtLoginManager.errorMessage {
+                loginItemsGuidance(errorMessage)
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func loginItemsGuidance(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(message)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Button("Open Login Items") {
+                launchAtLoginManager.openLoginItems()
+            }
+            .buttonStyle(.bordered)
+        }
     }
 
     // MARK: Suppression

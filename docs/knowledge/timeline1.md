@@ -2,6 +2,11 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-07-12 — Launch at Startup setting
+- **What:** added a General Settings toggle that starts the NoNoise Mac menu-bar app when the user logs in.
+- **How:** uses `SMAppService.mainApp` as the system-owned source of truth, with approval and recoverable error guidance in the UI; no duplicate preference, helper, LaunchAgent, or entitlement was added.
+- **Verification:** the Service Management path requires manual verification in the bundled app, including System Settings → General → Login Items when approval is requested.
+
 ### 2026-06-22 — Repin NoNoise Mic Engine after hardware churn (Codex)
 - **What:** Added a tested `VirtualMicRouting.shouldRepinPlaybackAfterHardwareRefresh` predicate and
   wired `AudioModel.fetchOutputDevices()` to explicitly rebuild the playback graph when a hardware
