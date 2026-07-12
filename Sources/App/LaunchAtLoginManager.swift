@@ -49,6 +49,7 @@ final class LaunchAtLoginManager: ObservableObject {
     }
 
     func openLoginItems() {
+        guard #available(macOS 14.0, *) else { return }
         SMAppService.openSystemSettingsLoginItems()
     }
 }
