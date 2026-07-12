@@ -45,6 +45,9 @@ let package = Package(
             path: "Sources/App",
             resources: [
                 .process("../../Resources")
+            ],
+            linkerSettings: [
+                .linkedFramework("ServiceManagement")
             ]
         ),
         .executableTarget(
