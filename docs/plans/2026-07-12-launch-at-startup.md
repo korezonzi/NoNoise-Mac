@@ -10,6 +10,8 @@
 
 **GitHub Issue:** #17 — https://github.com/ivalsaraj/NoNoise-Mac/issues/17
 
+**Pull Request:** #18 — https://github.com/ivalsaraj/NoNoise-Mac/pull/18
+
 **Assumptions:** The setting is off by default on clean and existing installs unless macOS already reports the app as enabled. The user can change this default later without changing the architecture.
 
 ---
@@ -290,3 +292,8 @@ Expected: only the feature commits are present; unrelated pre-existing files suc
 - Do not add a UserDefaults key or migrate existing `mv.*` settings.
 - Do not add entitlements or change the CoreAudio/CoreML pipeline.
 - Do not make startup launch enable AI, auto-route devices, or alter any persisted audio setting.
+
+## Status
+
+Completed. Automated checks and bundled signature verification passed. Manual Login Items behavior
+still requires verification on an installed macOS bundle.
