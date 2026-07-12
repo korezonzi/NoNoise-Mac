@@ -8,6 +8,8 @@
 
 **Tech Stack:** Swift 5.9, SwiftUI, `ServiceManagement.SMAppService`, Swift Package Manager, XCTest.
 
+**GitHub Issue:** #17 — https://github.com/ivalsaraj/NoNoise-Mac/issues/17
+
 **Assumptions:** The setting is off by default on clean and existing installs unless macOS already reports the app as enabled. The user can change this default later without changing the architecture.
 
 ---
