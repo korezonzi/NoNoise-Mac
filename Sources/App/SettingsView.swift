@@ -113,7 +113,8 @@ struct GeneralSettingsView: View {
                 loginItemsGuidance("macOS requires approval in System Settings > General > Login Items.")
             } else if launchAtLoginManager.state == .notFound {
                 loginItemsGuidance("Launch at Startup works when NoNoise Mac is running as a bundled app.")
-            } else if let errorMessage = launchAtLoginManager.errorMessage {
+            }
+            if let errorMessage = launchAtLoginManager.errorMessage {
                 loginItemsGuidance(errorMessage)
             }
         }

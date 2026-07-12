@@ -6,7 +6,7 @@ import ServiceManagement
 @MainActor
 final class LaunchAtLoginManager: ObservableObject {
     @Published private(set) var state: LaunchAtLoginState = .notRegistered
-    private(set) var errorMessage: String?
+    @Published private(set) var errorMessage: String?
 
     var isEnabled: Bool { state.isEnabled }
 
@@ -38,6 +38,9 @@ final class LaunchAtLoginManager: ObservableObject {
             } else {
                 try SMAppService.mainApp.unregister()
             }
+        } catch let error as NSError where enabled && error.code == Int(kSMErrorAlreadyRegistered) {
+            // Registration is idempotent from the user's perspective.
+            errorMessage = nil
         } catch {
             errorMessage = "NoNoise Mac could not update its login item."
         }
