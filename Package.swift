@@ -9,9 +9,6 @@ let package = Package(
     products: [
         .executable(name: "NoNoiseMac", targets: ["NoNoiseMac"])
     ],
-    dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
-    ],
     targets: [
         // Lock-free C11-atomics SPSC float ring for the tap-based Clean Incoming path (bridges the
         // process-tap IOProc → AVAudioSourceNode, two realtime threads). C target because acquire/
@@ -39,8 +36,7 @@ let package = Package(
         .executableTarget(
             name: "NoNoiseMac",
             dependencies: [
-                "Core",
-                .product(name: "Sparkle", package: "Sparkle")
+                "Core"
             ],
             path: "Sources/App",
             resources: [
