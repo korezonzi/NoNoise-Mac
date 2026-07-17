@@ -68,6 +68,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     // consumer app is using "NoNoise Mic" (observed via kAudioDevicePropertyDeviceIsRunningSomewhere).
     // Without the driver (BlackHole fallback) there's no per-use signal, so we capture continuously.
     private var micDeviceID: AudioObjectID = 0
+    private var diagLoggedFirstSample = false
     private var isRunningSomewhereListener: AudioObjectPropertyListenerBlock?
     private var isRunningSomewhereAddr = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
@@ -801,6 +802,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         }
 
         let routeUID = VirtualMicRouting.preferredOutputUID(from: allDevs)   // engine (by UID), else BlackHole, else nil
+        FileHandle.standardError.write(Data("DIAG: fetchOutputDevices routeUID=\(routeUID ?? "nil") engineRouteID=\(engineRouteID)\n".utf8))
         DispatchQueue.main.async {
             self.outputDevices = newDevs
             // The visible "NoNoise Mic" is INPUT-only, so it is NOT in the output-scoped allDevs.
@@ -860,8 +862,10 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         
         do {
             try engine.start()
+            FileHandle.standardError.write(Data("DIAG: engine started, out=\(selectedOutputDeviceID)\n".utf8))
         } catch {
             print("Engine Error: \(error)")
+            FileHandle.standardError.write(Data("DIAG: engine start FAILED: \(error)\n".utf8))
         }
     }
     
@@ -958,6 +962,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             isRunningSomewhereListener = nil
         }
         micDeviceID = deviceID(forUID: VirtualMicRouting.visibleDeviceUID)
+        FileHandle.standardError.write(Data("DIAG: resolveVirtualMicLifecycle micDeviceID=\(micDeviceID) onDemand=\(onDemandMode)\n".utf8))
         guard onDemandMode else {
             virtualMicInUse = false
             if wasOnDemandMode { startCapture() }
@@ -979,6 +984,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         var addr = isRunningSomewhereAddr
         AudioObjectGetPropertyData(micDeviceID, &addr, 0, nil, &size, &val)
         let inUse = val != 0
+        FileHandle.standardError.write(Data("DIAG: refreshVirtualMicUsage inUse=\(inUse)\n".utf8))
         virtualMicInUse = inUse
         if inUse { startCapture() } else { stopCapture() }
     }
@@ -1014,11 +1020,13 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     }
 
     private func startCapture() {
+        FileHandle.standardError.write(Data("DIAG: startCapture (isRunning=\(captureSession.isRunning))\n".utf8))
         guard !captureSession.isRunning else { return }
         DispatchQueue.global(qos: .userInitiated).async { self.captureSession.startRunning() }
     }
 
     private func stopCapture() {
+        FileHandle.standardError.write(Data("DIAG: stopCapture (isRunning=\(captureSession.isRunning))\n".utf8))
         guard captureSession.isRunning else { return }
         DispatchQueue.global(qos: .userInitiated).async { self.captureSession.stopRunning() }
     }
@@ -1218,7 +1226,10 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     
     public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         // Converter state persists for continuous stream. No reset needed.
-        
+        if !diagLoggedFirstSample {
+            diagLoggedFirstSample = true
+            FileHandle.standardError.write(Data("DIAG: captureOutput first sample received\n".utf8))
+        }
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
         // Use AudioStreamBasicDescription to create AVAudioFormat
         guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else { return }
