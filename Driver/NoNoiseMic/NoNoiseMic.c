@@ -9,10 +9,19 @@
 // Topology (see the plan's shared-contract table — these constants MUST match the Swift side):
 //   • Visible INPUT-only device  "NoNoise Mic"        (UID NoNoiseMic:visible:48k2ch) → apps pick this.
 //   • Hidden  OUTPUT-only device "NoNoise Mic Engine" (UID NoNoiseMic:engine:48k2ch) → the app renders here.
-// Both devices share ONE loopback ring (nn_ring) and a per-device zero-timestamp clock
+// Mic/Engine share ONE loopback ring (nn_ring) and a per-device zero-timestamp clock
 // (nn_clock) anchored to a SINGLE host-time captured on the first StartIO, so the engine's
 // write sample-time axis and the mic's read sample-time axis coincide. The visible device's
 // 'srcm' (sourceMode) property selects loopback (0, A1 default) vs xpc shm (1, A2).
+//
+// A second, symmetric pair mirrors this for outgoing playback (LINE/Meet "speaker" routing):
+//   • Visible OUTPUT-only device "NoNoise Speaker"     (UID NoNoiseSpk:visible:48k2ch) → apps pick this
+//     as their playback device.
+//   • Hidden  INPUT-only  device "NoNoise Speaker Tap" (UID NoNoiseSpk:tap:48k2ch) → the app reads the
+//     rendered audio here for AI cleanup before re-playing it on the real output.
+// Speaker/SpeakerTap share their OWN loopback ring (gRingSpk) but the SAME shared IO-count /
+// anchor-host-time epoch as Mic/Engine (see StartIO) — one plug-in-wide clock anchor, two
+// independent rings.
 //
 // Canonical buffer layout: ONE interleaved Float32 stereo stream [L0,R0,L1,R1,…]; ioMainBuffer
 // is passed straight into nn_ring (channels=2) with no de/interleave.
@@ -40,6 +49,12 @@
 #define kDeviceUID_Engine       CFSTR("NoNoiseMic:engine:48k2ch")
 #define kModelUID               CFSTR("NoNoiseMic:model:1")
 
+#define kDeviceName_Speaker     CFSTR("NoNoise Speaker")
+#define kDeviceName_SpeakerTap  CFSTR("NoNoise Speaker Tap")
+#define kDeviceUID_Speaker      CFSTR("NoNoiseSpk:visible:48k2ch")
+#define kDeviceUID_SpeakerTap   CFSTR("NoNoiseSpk:tap:48k2ch")
+#define kModelUID_Speaker       CFSTR("NoNoiseSpk:model:1")
+
 // sourceMode custom property. Use the char literal so the compiler computes the FourCharCode
 // (a hand-typed hex with a transposed digit fails SILENTLY and the A2 toggle never switches).
 #define kSourceModeSelector     ((AudioObjectPropertySelector)'srcm')   // == 0x7372636D
@@ -50,11 +65,15 @@ static const UInt32  kZeroTimeStampPeriod = 8192;   // frames between zero times
 #define kRingFrames 65536u                          // power of two, ≥ 1s headroom at 48k (macro: sizes a real array)
 
 enum {
-    kObjectID_PlugIn               = kAudioObjectPlugInObject, // 1
-    kObjectID_Device_Mic           = 2,
-    kObjectID_Stream_Mic_Input     = 3,
-    kObjectID_Device_Engine        = 4,
-    kObjectID_Stream_Engine_Output = 5
+    kObjectID_PlugIn                  = kAudioObjectPlugInObject, // 1
+    kObjectID_Device_Mic              = 2,
+    kObjectID_Stream_Mic_Input        = 3,
+    kObjectID_Device_Engine           = 4,
+    kObjectID_Stream_Engine_Output    = 5,
+    kObjectID_Device_Speaker          = 6,
+    kObjectID_Stream_Speaker_Output   = 7,
+    kObjectID_Device_SpeakerTap       = 8,
+    kObjectID_Stream_SpeakerTap_Input = 9
 };
 
 #pragma mark - Plug-in state
@@ -62,17 +81,25 @@ enum {
 static AudioServerPlugInHostRef gHost = NULL;
 
 static pthread_mutex_t gStateMutex = PTHREAD_MUTEX_INITIALIZER;
-static UInt64   gAnchorHostTime = 0;
-static UInt32   gIOCount        = 0;       // devices currently running IO (anchors the shared clock)
-static bool     gMicRunning     = false;
-static bool     gEngineRunning  = false;
+static UInt64   gAnchorHostTime    = 0;
+static UInt32   gIOCount           = 0;       // devices currently running IO (anchors the shared clock)
+static bool     gMicRunning        = false;
+static bool     gEngineRunning     = false;
+static bool     gSpeakerRunning    = false;
+static bool     gSpeakerTapRunning = false;
 
 static nn_clock gClockMic;
 static nn_clock gClockEngine;
+static nn_clock gClockSpeaker;
+static nn_clock gClockSpeakerTap;
 
-static float    gRingStorage[kRingFrames * 2]; // interleaved stereo
+static float    gRingStorage[kRingFrames * 2]; // interleaved stereo — Mic/Engine loopback
 static nn_ring  gRing;
 static bool     gRingInit = false;
+
+static float    gRingStorageSpk[kRingFrames * 2]; // interleaved stereo — Speaker/SpeakerTap loopback
+static nn_ring  gRingSpk;
+static bool     gRingSpkInit = false;
 
 // 0 = loopback (A1 default), 1 = xpc (A2). Read on the IO thread → atomic.
 static _Atomic uint32_t gSourceMode = 0;
@@ -100,10 +127,17 @@ static AudioStreamBasicDescription MakeASBD(void) {
     return a;
 }
 
-static bool isMicDevice(AudioObjectID o)    { return o == kObjectID_Device_Mic; }
-static bool isEngineDevice(AudioObjectID o) { return o == kObjectID_Device_Engine; }
-static bool isDevice(AudioObjectID o)       { return isMicDevice(o) || isEngineDevice(o); }
-static bool isStream(AudioObjectID o)       { return o == kObjectID_Stream_Mic_Input || o == kObjectID_Stream_Engine_Output; }
+static bool isMicDevice(AudioObjectID o)        { return o == kObjectID_Device_Mic; }
+static bool isEngineDevice(AudioObjectID o)     { return o == kObjectID_Device_Engine; }
+static bool isSpeakerDevice(AudioObjectID o)    { return o == kObjectID_Device_Speaker; }
+static bool isSpeakerTapDevice(AudioObjectID o) { return o == kObjectID_Device_SpeakerTap; }
+static bool isDevice(AudioObjectID o) {
+    return isMicDevice(o) || isEngineDevice(o) || isSpeakerDevice(o) || isSpeakerTapDevice(o);
+}
+static bool isStream(AudioObjectID o) {
+    return o == kObjectID_Stream_Mic_Input || o == kObjectID_Stream_Engine_Output ||
+           o == kObjectID_Stream_Speaker_Output || o == kObjectID_Stream_SpeakerTap_Input;
+}
 
 // The single stream a device owns, filtered by scope. Returns count (0 or 1), fills out[0].
 static UInt32 deviceStreamList(AudioObjectID dev, AudioObjectPropertyScope scope, AudioObjectID *out) {
@@ -112,9 +146,68 @@ static UInt32 deviceStreamList(AudioObjectID dev, AudioObjectPropertyScope scope
         out[0] = kObjectID_Stream_Mic_Input;
         return 1;
     }
-    if (scope == kAudioObjectPropertyScopeInput) return 0;
-    out[0] = kObjectID_Stream_Engine_Output;
+    if (isEngineDevice(dev)) {
+        if (scope == kAudioObjectPropertyScopeInput) return 0;
+        out[0] = kObjectID_Stream_Engine_Output;
+        return 1;
+    }
+    if (isSpeakerDevice(dev)) {
+        if (scope == kAudioObjectPropertyScopeInput) return 0;
+        out[0] = kObjectID_Stream_Speaker_Output;
+        return 1;
+    }
+    // SpeakerTap (hidden input-only)
+    if (scope == kAudioObjectPropertyScopeOutput) return 0;
+    out[0] = kObjectID_Stream_SpeakerTap_Input;
     return 1;
+}
+
+// deviceIsRunningLocked/deviceTraits/streamTraits generalize the property getters below to all
+// 4 devices. MUST be called with gStateMutex held where noted (running flags only).
+static bool deviceIsRunningLocked(AudioObjectID dev) {
+    if (isMicDevice(dev))     return gMicRunning;
+    if (isEngineDevice(dev))  return gEngineRunning;
+    if (isSpeakerDevice(dev)) return gSpeakerRunning;
+    return gSpeakerTapRunning;
+}
+
+// Per-device constant metadata. Mic/Engine values are byte-for-byte identical to the pre-existing
+// ternary logic — only Speaker/SpeakerTap are new.
+typedef struct {
+    CFStringRef name;
+    CFStringRef uid;
+    CFStringRef modelUID;
+    bool        isHidden;
+    bool        canBeDefault; // drives BOTH CanBeDefaultDevice and CanBeDefaultSystemDevice
+} DeviceTraits;
+
+static DeviceTraits deviceTraits(AudioObjectID dev) {
+    if (isMicDevice(dev)) {
+        return (DeviceTraits){ kDeviceName_Mic, kDeviceUID_Mic, kModelUID, false, true };
+    }
+    if (isEngineDevice(dev)) {
+        return (DeviceTraits){ kDeviceName_Engine, kDeviceUID_Engine, kModelUID, true, false };
+    }
+    if (isSpeakerDevice(dev)) {
+        return (DeviceTraits){ kDeviceName_Speaker, kDeviceUID_Speaker, kModelUID_Speaker, false, true };
+    }
+    // SpeakerTap
+    return (DeviceTraits){ kDeviceName_SpeakerTap, kDeviceUID_SpeakerTap, kModelUID_Speaker, true, false };
+}
+
+// Per-stream constant metadata. Mic/Engine values are byte-for-byte identical to the pre-existing
+// `input` ternary — only Speaker/SpeakerTap streams are new.
+typedef struct {
+    AudioObjectID owner;
+    bool          isInput;
+} StreamTraits;
+
+static StreamTraits streamTraits(AudioObjectID s) {
+    if (s == kObjectID_Stream_Mic_Input)      return (StreamTraits){ kObjectID_Device_Mic, true };
+    if (s == kObjectID_Stream_Engine_Output)  return (StreamTraits){ kObjectID_Device_Engine, false };
+    if (s == kObjectID_Stream_Speaker_Output) return (StreamTraits){ kObjectID_Device_Speaker, false };
+    // SpeakerTap input
+    return (StreamTraits){ kObjectID_Device_SpeakerTap, true };
 }
 
 static void NotifyChanged(AudioObjectID obj, const AudioObjectPropertyAddress *addr) {
@@ -255,7 +348,7 @@ static OSStatus NoNoiseMic_GetPropertyDataSize(AudioServerPlugInDriverRef inDriv
             case kAudioObjectPropertyManufacturer:
             case kAudioPlugInPropertyResourceBundle:    *outDataSize = sizeof(CFStringRef);   return noErr;
             case kAudioObjectPropertyOwnedObjects:
-            case kAudioPlugInPropertyDeviceList:        *outDataSize = 2 * sizeof(AudioObjectID); return noErr;
+            case kAudioPlugInPropertyDeviceList:        *outDataSize = 4 * sizeof(AudioObjectID); return noErr;
             case kAudioPlugInPropertyTranslateUIDToDevice: *outDataSize = sizeof(AudioObjectID); return noErr;
             default: return kAudioHardwareUnknownPropertyError;
         }
@@ -352,8 +445,8 @@ static OSStatus NoNoiseMic_GetPropertyData(AudioServerPlugInDriverRef inDriver, 
             case kAudioPlugInPropertyResourceBundle: PUT_CFSTRING(CFSTR(""));
             case kAudioObjectPropertyOwnedObjects:
             case kAudioPlugInPropertyDeviceList: {
-                AudioObjectID devs[2] = { kObjectID_Device_Mic, kObjectID_Device_Engine };
-                CLAMP_ARRAY(AudioObjectID, 2);
+                AudioObjectID devs[4] = { kObjectID_Device_Mic, kObjectID_Device_Engine, kObjectID_Device_Speaker, kObjectID_Device_SpeakerTap };
+                CLAMP_ARRAY(AudioObjectID, 4);
                 memcpy(outData, devs, _n * sizeof(AudioObjectID));
                 *outDataSize = _n * sizeof(AudioObjectID);
                 return noErr;
@@ -364,8 +457,10 @@ static OSStatus NoNoiseMic_GetPropertyData(AudioServerPlugInDriverRef inDriver, 
                 CFStringRef uid = *(const CFStringRef *)inQualifierData;
                 if (uid == NULL) return kAudioHardwareIllegalOperationError; // don't CFEqual a NULL qualifier
                 AudioObjectID match = kAudioObjectUnknown;
-                if (CFEqual(uid, kDeviceUID_Mic))         match = kObjectID_Device_Mic;
-                else if (CFEqual(uid, kDeviceUID_Engine)) match = kObjectID_Device_Engine;
+                if (CFEqual(uid, kDeviceUID_Mic))              match = kObjectID_Device_Mic;
+                else if (CFEqual(uid, kDeviceUID_Engine))      match = kObjectID_Device_Engine;
+                else if (CFEqual(uid, kDeviceUID_Speaker))     match = kObjectID_Device_Speaker;
+                else if (CFEqual(uid, kDeviceUID_SpeakerTap))  match = kObjectID_Device_SpeakerTap;
                 *(AudioObjectID *)outData = match;
                 *outDataSize = sizeof(AudioObjectID);
                 return noErr;
@@ -375,32 +470,32 @@ static OSStatus NoNoiseMic_GetPropertyData(AudioServerPlugInDriverRef inDriver, 
     }
 
     if (isDevice(inObjectID)) {
-        const bool mic = isMicDevice(inObjectID);
+        const DeviceTraits t = deviceTraits(inObjectID);
         switch (sel) {
             case kAudioObjectPropertyBaseClass: PUT_SCALAR(AudioClassID, kAudioObjectClassID);
             case kAudioObjectPropertyClass:     PUT_SCALAR(AudioClassID, kAudioDeviceClassID);
             case kAudioObjectPropertyOwner:     PUT_SCALAR(AudioObjectID, kObjectID_PlugIn);
-            case kAudioObjectPropertyName:      PUT_CFSTRING(mic ? kDeviceName_Mic : kDeviceName_Engine);
+            case kAudioObjectPropertyName:      PUT_CFSTRING(t.name);
             case kAudioObjectPropertyManufacturer: PUT_CFSTRING(kManufacturerName);
-            case kAudioDevicePropertyDeviceUID: PUT_CFSTRING(mic ? kDeviceUID_Mic : kDeviceUID_Engine);
-            case kAudioDevicePropertyModelUID:  PUT_CFSTRING(kModelUID);
+            case kAudioDevicePropertyDeviceUID: PUT_CFSTRING(t.uid);
+            case kAudioDevicePropertyModelUID:  PUT_CFSTRING(t.modelUID);
             case kAudioDevicePropertyTransportType: PUT_SCALAR(UInt32, kAudioDeviceTransportTypeVirtual);
             case kAudioDevicePropertyClockDomain: PUT_SCALAR(UInt32, 0);
             case kAudioDevicePropertyDeviceIsAlive: PUT_SCALAR(UInt32, 1);
             case kAudioDevicePropertyDeviceIsRunning: {
                 if (inDataSize < sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
                 pthread_mutex_lock(&gStateMutex);
-                UInt32 running = (mic ? gMicRunning : gEngineRunning) ? 1 : 0;
+                UInt32 running = deviceIsRunningLocked(inObjectID) ? 1 : 0;
                 pthread_mutex_unlock(&gStateMutex);
                 *(UInt32 *)outData = running; *outDataSize = sizeof(UInt32); return noErr;
             }
-            // The hidden engine must NEVER be auto-selected as a default device — only the
-            // visible mic is input-eligible. (output scope for the engine returns 0.)
-            case kAudioDevicePropertyDeviceCanBeDefaultDevice:       PUT_SCALAR(UInt32, (UInt32)(mic ? 1 : 0));
-            case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: PUT_SCALAR(UInt32, (UInt32)(mic ? 1 : 0));
+            // Hidden devices (Engine, SpeakerTap) must NEVER be auto-selected as a default device —
+            // only the visible Mic/Speaker are default-eligible.
+            case kAudioDevicePropertyDeviceCanBeDefaultDevice:       PUT_SCALAR(UInt32, (UInt32)(t.canBeDefault ? 1 : 0));
+            case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice: PUT_SCALAR(UInt32, (UInt32)(t.canBeDefault ? 1 : 0));
             case kAudioDevicePropertyLatency:       PUT_SCALAR(UInt32, 0);
             case kAudioDevicePropertySafetyOffset:  PUT_SCALAR(UInt32, 0);
-            case kAudioDevicePropertyIsHidden:      PUT_SCALAR(UInt32, (UInt32)(mic ? 0 : 1));
+            case kAudioDevicePropertyIsHidden:      PUT_SCALAR(UInt32, (UInt32)(t.isHidden ? 1 : 0));
             case kAudioDevicePropertyZeroTimeStampPeriod: PUT_SCALAR(UInt32, kZeroTimeStampPeriod);
             case kAudioDevicePropertyNominalSampleRate: PUT_SCALAR(Float64, kSampleRate);
             case kAudioDevicePropertyRelatedDevices: {
@@ -434,8 +529,8 @@ static OSStatus NoNoiseMic_GetPropertyData(AudioServerPlugInDriverRef inDriver, 
             }
             default:
                 // sourceMode lives on the VISIBLE mic only (it owns the loopback-vs-xpc switch);
-                // the hidden engine does not advertise it.
-                if (sel == kSourceModeSelector && mic) {
+                // no other device (hidden engine, Speaker, SpeakerTap) advertises it.
+                if (sel == kSourceModeSelector && isMicDevice(inObjectID)) {
                     PUT_SCALAR(UInt32, atomic_load(&gSourceMode));
                 }
                 return kAudioHardwareUnknownPropertyError;
@@ -443,14 +538,14 @@ static OSStatus NoNoiseMic_GetPropertyData(AudioServerPlugInDriverRef inDriver, 
     }
 
     if (isStream(inObjectID)) {
-        const bool input = (inObjectID == kObjectID_Stream_Mic_Input);
+        const StreamTraits st = streamTraits(inObjectID);
         switch (sel) {
             case kAudioObjectPropertyBaseClass: PUT_SCALAR(AudioClassID, kAudioObjectClassID);
             case kAudioObjectPropertyClass:     PUT_SCALAR(AudioClassID, kAudioStreamClassID);
-            case kAudioObjectPropertyOwner:     PUT_SCALAR(AudioObjectID, input ? kObjectID_Device_Mic : kObjectID_Device_Engine);
+            case kAudioObjectPropertyOwner:     PUT_SCALAR(AudioObjectID, st.owner);
             case kAudioStreamPropertyIsActive:  PUT_SCALAR(UInt32, 1);
-            case kAudioStreamPropertyDirection: PUT_SCALAR(UInt32, (UInt32)(input ? 1 : 0)); // 1=input, 0=output
-            case kAudioStreamPropertyTerminalType: PUT_SCALAR(UInt32, (UInt32)(input ? kAudioStreamTerminalTypeMicrophone : kAudioStreamTerminalTypeSpeaker));
+            case kAudioStreamPropertyDirection: PUT_SCALAR(UInt32, (UInt32)(st.isInput ? 1 : 0)); // 1=input, 0=output
+            case kAudioStreamPropertyTerminalType: PUT_SCALAR(UInt32, (UInt32)(st.isInput ? kAudioStreamTerminalTypeMicrophone : kAudioStreamTerminalTypeSpeaker));
             case kAudioStreamPropertyStartingChannel: PUT_SCALAR(UInt32, 1);
             case kAudioStreamPropertyLatency:   PUT_SCALAR(UInt32, 0);
             case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; return noErr;
@@ -565,11 +660,18 @@ static OSStatus NoNoiseMic_StartIO(AudioServerPlugInDriverRef inDriver, AudioObj
         double tps = host_ticks_per_second();
         if (!gRingInit) { nn_ring_init(&gRing, gRingStorage, kRingFrames, kChannels); gRingInit = true; }
         nn_ring_clear(&gRing);
-        nn_clock_init(&gClockMic,    gAnchorHostTime, tps, kSampleRate, kZeroTimeStampPeriod);
-        nn_clock_init(&gClockEngine, gAnchorHostTime, tps, kSampleRate, kZeroTimeStampPeriod);
+        if (!gRingSpkInit) { nn_ring_init(&gRingSpk, gRingStorageSpk, kRingFrames, kChannels); gRingSpkInit = true; }
+        nn_ring_clear(&gRingSpk);
+        nn_clock_init(&gClockMic,        gAnchorHostTime, tps, kSampleRate, kZeroTimeStampPeriod);
+        nn_clock_init(&gClockEngine,     gAnchorHostTime, tps, kSampleRate, kZeroTimeStampPeriod);
+        nn_clock_init(&gClockSpeaker,    gAnchorHostTime, tps, kSampleRate, kZeroTimeStampPeriod);
+        nn_clock_init(&gClockSpeakerTap, gAnchorHostTime, tps, kSampleRate, kZeroTimeStampPeriod);
     }
     gIOCount++;
-    if (isMicDevice(inDeviceObjectID)) gMicRunning = true; else gEngineRunning = true;
+    if (isMicDevice(inDeviceObjectID))            gMicRunning = true;
+    else if (isEngineDevice(inDeviceObjectID))    gEngineRunning = true;
+    else if (isSpeakerDevice(inDeviceObjectID))   gSpeakerRunning = true;
+    else                                          gSpeakerTapRunning = true;
     pthread_mutex_unlock(&gStateMutex);
     return noErr;
 }
@@ -580,7 +682,10 @@ static OSStatus NoNoiseMic_StopIO(AudioServerPlugInDriverRef inDriver, AudioObje
 
     pthread_mutex_lock(&gStateMutex);
     if (gIOCount > 0) gIOCount--;
-    if (isMicDevice(inDeviceObjectID)) gMicRunning = false; else gEngineRunning = false;
+    if (isMicDevice(inDeviceObjectID))            gMicRunning = false;
+    else if (isEngineDevice(inDeviceObjectID))    gEngineRunning = false;
+    else if (isSpeakerDevice(inDeviceObjectID))   gSpeakerRunning = false;
+    else                                          gSpeakerTapRunning = false;
     if (gIOCount == 0) gAnchorHostTime = 0;
     pthread_mutex_unlock(&gStateMutex);
     return noErr;
@@ -592,7 +697,10 @@ static OSStatus NoNoiseMic_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver,
 
     uint64_t st = 0, ht = 0;
     pthread_mutex_lock(&gStateMutex);
-    nn_clock *c = isMicDevice(inDeviceObjectID) ? &gClockMic : &gClockEngine;
+    nn_clock *c = isMicDevice(inDeviceObjectID)     ? &gClockMic :
+                  isEngineDevice(inDeviceObjectID)  ? &gClockEngine :
+                  isSpeakerDevice(inDeviceObjectID) ? &gClockSpeaker :
+                                                       &gClockSpeakerTap;
     nn_clock_get_zero_timestamp(c, mach_absolute_time(), &st, &ht);
     pthread_mutex_unlock(&gStateMutex);
 
@@ -604,10 +712,12 @@ static OSStatus NoNoiseMic_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver,
 
 static OSStatus NoNoiseMic_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean *outWillDo, Boolean *outWillDoInPlace) {
     (void)inDriver; (void)inClientID;
-    // Direction-specific, mirroring DoIOOperation: the mic only reads input, the engine only
-    // writes its mix. (Claiming both on both devices is harmless but misrepresents the topology.)
-    bool will = (isMicDevice(inDeviceObjectID)    && inOperationID == kAudioServerPlugInIOOperationReadInput) ||
-                (isEngineDevice(inDeviceObjectID) && inOperationID == kAudioServerPlugInIOOperationWriteMix);
+    // Direction-specific, mirroring DoIOOperation: the mic/tap only read input, the engine/speaker
+    // only write their mix. (Claiming both on both devices is harmless but misrepresents the topology.)
+    bool will = (isMicDevice(inDeviceObjectID)        && inOperationID == kAudioServerPlugInIOOperationReadInput)  ||
+                (isEngineDevice(inDeviceObjectID)     && inOperationID == kAudioServerPlugInIOOperationWriteMix)   ||
+                (isSpeakerDevice(inDeviceObjectID)    && inOperationID == kAudioServerPlugInIOOperationWriteMix)   ||
+                (isSpeakerTapDevice(inDeviceObjectID) && inOperationID == kAudioServerPlugInIOOperationReadInput);
     if (outWillDo)        *outWillDo = will;
     if (outWillDoInPlace) *outWillDoInPlace = true;
     return noErr;
@@ -618,8 +728,8 @@ static OSStatus NoNoiseMic_BeginIOOperation(AudioServerPlugInDriverRef inDriver,
     return noErr;
 }
 
-// Real-time path: NO allocation / locks / syscalls. gRing/gSourceMode are lock-free; the shared
-// nn_clock keeps the mic read trailing the engine write on a common sample-time axis.
+// Real-time path: NO allocation / locks / syscalls. gRing/gRingSpk/gSourceMode are lock-free; the
+// shared nn_clocks keep each pair's reader trailing its writer on a common sample-time axis.
 static OSStatus NoNoiseMic_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo *inIOCycleInfo, void *ioMainBuffer, void *ioSecondaryBuffer) {
     (void)inDriver; (void)inStreamObjectID; (void)inClientID; (void)ioSecondaryBuffer;
     if (ioMainBuffer == NULL || inIOCycleInfo == NULL) return noErr;
@@ -640,6 +750,22 @@ static OSStatus NoNoiseMic_DoIOOperation(AudioServerPlugInDriverRef inDriver, Au
             // A2 (xpc) shm path lands in Task 15 — until then serve silence, never stale audio.
             memset(ioMainBuffer, 0, (size_t)inIOBufferFrameSize * kChannels * sizeof(float));
         }
+        return noErr;
+    }
+
+    // Speaker/SpeakerTap loopback — same pattern as Engine/Mic above but on gRingSpk. No
+    // sourceMode branch here: this pair only ever does in-driver loopback (no xpc variant).
+    if (isSpeakerDevice(inDeviceObjectID) && inOperationID == kAudioServerPlugInIOOperationWriteMix) {
+        double sd = inIOCycleInfo->mOutputTime.mSampleTime;
+        if (sd < 0.0) sd = 0.0;
+        nn_ring_write_at(&gRingSpk, (uint64_t)sd, (const float *)ioMainBuffer, inIOBufferFrameSize);
+        return noErr;
+    }
+
+    if (isSpeakerTapDevice(inDeviceObjectID) && inOperationID == kAudioServerPlugInIOOperationReadInput) {
+        double sd = inIOCycleInfo->mInputTime.mSampleTime;
+        if (sd < 0.0) sd = 0.0;
+        nn_ring_read_at(&gRingSpk, (uint64_t)sd, (float *)ioMainBuffer, inIOBufferFrameSize);
         return noErr;
     }
 

@@ -1,7 +1,9 @@
 import Foundation
 
-/// Pure, headless-testable routing/filtering logic for the NoNoise Mic virtual driver (the OUTGOING
-/// mic path). Operates on plain values (no CoreAudio) so it runs under `swift test`.
+/// Pure, headless-testable routing/filtering logic for the NoNoise virtual driver devices: the
+/// OUTGOING mic pair ("NoNoise Mic" + hidden "NoNoise Mic Engine") and the INCOMING speaker pair
+/// ("NoNoise Speaker" + hidden "NoNoise Speaker Tap"). Operates on plain values (no CoreAudio) so
+/// it runs under `swift test`.
 ///
 /// The constants here are the Swift half of the app↔driver shared contract — they MUST stay
 /// identical to the driver's C constants (see `Driver/NoNoiseMic/NoNoiseMic.c` and the plan's
@@ -12,6 +14,13 @@ public enum VirtualMicRouting {
     public static let engineDeviceName  = "NoNoise Mic Engine"
     public static let visibleDeviceUID  = "NoNoiseMic:visible:48k2ch"
     public static let engineDeviceUID   = "NoNoiseMic:engine:48k2ch"
+
+    // Shared contract — virtual SPEAKER output + its hidden tap (INCOMING path, separate
+    // driver device pair from the mic above). Keep identical to the driver's C constants.
+    public static let speakerDeviceName    = "NoNoise Speaker"
+    public static let speakerDeviceUID     = "NoNoiseSpk:visible:48k2ch"
+    public static let speakerTapDeviceName = "NoNoise Speaker Tap"
+    public static let speakerTapDeviceUID  = "NoNoiseSpk:tap:48k2ch"
 
     /// Known virtual sinks we will auto-route to, in priority order. A physical
     /// output is NEVER a fallback (would play cleaned audio aloud, not feed a mic).
@@ -35,9 +44,21 @@ public enum VirtualMicRouting {
         d.uid == engineDeviceUID || d.name == engineDeviceName
     }
 
-    /// An output the user may pick in the APP's own picker: not hidden AND not our engine.
+    /// True for our visible virtual SPEAKER output. Matches by UID OR name (same defensive
+    /// pattern as `isNoNoiseEngine`) — this device is NOT hidden (LINE/Meet/etc. must be able
+    /// to select it at the HAL level), so the hidden flag alone can't keep it out of the APP's
+    /// own picker.
+    public static func isNoNoiseSpeaker(_ d: DeviceInfo) -> Bool {
+        d.uid == speakerDeviceUID || d.name == speakerDeviceName
+    }
+
+    /// An output the user may pick in the APP's own picker: not hidden, not our mic engine,
+    /// and not our own virtual speaker. The speaker is excluded here even though it's visible
+    /// at the HAL level (LINE/Meet DO see it in their own pickers) — picking it as THIS app's
+    /// render destination would feed NoNoise's own output back into its incoming-cleanup tap,
+    /// an audio loop. This function only governs NoNoise's own UI, not other apps' pickers.
     public static func isSelectableOutput(_ d: DeviceInfo) -> Bool {
-        !d.isHidden && !isNoNoiseEngine(d)
+        !d.isHidden && !isNoNoiseEngine(d) && !isNoNoiseSpeaker(d)
     }
 
     /// UID of the output the engine should render into: the hidden engine device if present,
@@ -67,9 +88,11 @@ public enum VirtualMicRouting {
         resolvedOutputDeviceID == previousOutputDeviceID
     }
 
-    /// Remove the virtual mic from a list of input device names (prevents a
-    /// feedback loop if the user could otherwise select it as the capture source).
+    /// Remove the virtual mic (and the hidden speaker tap) from a list of input device names
+    /// (prevents a feedback loop if the user could otherwise select them as the capture source).
+    /// The speaker tap is hidden so it normally wouldn't surface here — excluded defensively,
+    /// mirroring how the mic engine is excluded even though it too should already be hidden.
     public static func filterInputs(_ names: [String]) -> [String] {
-        names.filter { $0 != visibleDeviceName && $0 != engineDeviceName }
+        names.filter { $0 != visibleDeviceName && $0 != engineDeviceName && $0 != speakerTapDeviceName }
     }
 }
