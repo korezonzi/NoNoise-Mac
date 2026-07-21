@@ -150,7 +150,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
 
         let toggleAllItem = NSMenuItem(
-            title: anyOn ? "Turn All Off" : "Turn All On",
+            title: anyOn ? "すべてOFF" : "すべてON",
             action: #selector(toggleAllFromMenu),
             keyEquivalent: ""
         )
@@ -160,7 +160,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let openControlsItem = NSMenuItem(
-            title: "Open Controls",
+            title: "コントロールを開く",
             action: #selector(openControlsFromMenu),
             keyEquivalent: ""
         )
@@ -168,7 +168,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(openControlsItem)
 
         let quitItem = NSMenuItem(
-            title: "Quit NoNoise Mac",
+            title: "NoNoise Mac を終了",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: ""
         )

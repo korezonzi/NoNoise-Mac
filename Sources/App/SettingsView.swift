@@ -12,17 +12,17 @@ struct SettingsView: View {
         TabView {
             GeneralSettingsView(audioModel: audioModel, meterModel: audioModel.meterModel, updaterController: updaterController, launchAtLoginManager: launchAtLoginManager)
                 .tabItem {
-                    Label("General", systemImage: "slider.horizontal.3")
+                    Label("全般", systemImage: "slider.horizontal.3")
                 }
 
             HotkeySettingsView(manager: hotkeyManager)
                 .tabItem {
-                    Label("Hotkeys", systemImage: "keyboard")
+                    Label("ホットキー", systemImage: "keyboard")
                 }
 
             GuideView()
                 .tabItem {
-                    Label("Setup Guide", systemImage: "book.pages")
+                    Label("セットアップ", systemImage: "book.pages")
                 }
         }
         .padding(20)
@@ -62,13 +62,13 @@ struct GeneralSettingsView: View {
             }
             .padding(.trailing, 2)
         }
-        .alert("Reset settings?", isPresented: $isShowingResetConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Reset", role: .destructive) {
+        .alert("設定をリセットしますか？", isPresented: $isShowingResetConfirmation) {
+            Button("キャンセル", role: .cancel) {}
+            Button("リセット", role: .destructive) {
                 withAnimation { audioModel.resetSettingsToDefaults() }
             }
         } message: {
-            Text("This restores NoNoise Mac audio and device settings to defaults. Saved Voice Profiles and custom Hotkeys are kept.")
+            Text("NoNoise Macの音声・デバイス設定を初期値に戻します。保存済みの設定プロファイルとカスタムホットキーは維持されます。")
         }
     }
 
@@ -79,7 +79,7 @@ struct GeneralSettingsView: View {
                 Text("NoNoise Mac")
                     .font(.system(.title3, design: .rounded))
                     .fontWeight(.bold)
-                Text("Real-time, on-device AI noise cancellation for macOS")
+                Text("macOS向け、リアルタイム・オンデバイスAIノイズ除去")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -100,9 +100,9 @@ struct GeneralSettingsView: View {
                 set: { launchAtLoginManager.setEnabled($0) }
             )) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Launch at Startup")
+                    Text("ログイン時に自動起動")
                         .font(.subheadline)
-                    Text("Start NoNoise Mac automatically when you log in to your Mac.")
+                    Text("Macにログインすると自動的にNoNoise Macを起動します。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -110,9 +110,9 @@ struct GeneralSettingsView: View {
             .toggleStyle(.switch)
 
             if launchAtLoginManager.state == .requiresApproval {
-                loginItemsGuidance("macOS requires approval in System Settings > General > Login Items.")
+                loginItemsGuidance("macOSの承認が必要です。システム設定 > 一般 > ログイン項目で確認してください。")
             } else if launchAtLoginManager.state == .notFound {
-                loginItemsGuidance("Launch at Startup works when NoNoise Mac is running as a bundled app.")
+                loginItemsGuidance("ログイン時の自動起動は、NoNoise Macがアプリとして実行されている場合に有効です。")
             }
             if let errorMessage = launchAtLoginManager.errorMessage {
                 loginItemsGuidance(errorMessage)
@@ -128,7 +128,7 @@ struct GeneralSettingsView: View {
             Text(message)
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Button("Open Login Items") {
+            Button("ログイン項目を開く") {
                 launchAtLoginManager.openLoginItems()
             }
             .buttonStyle(.bordered)
@@ -139,7 +139,7 @@ struct GeneralSettingsView: View {
 
     private var suppressionCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("Noise Suppression", systemImage: "waveform.badge.magnifyingglass")
+            sectionHeader("ノイズ除去", systemImage: "waveform.badge.magnifyingglass")
 
             Picker("", selection: $audioModel.selectedPreset) {
                 ForEach(VoicePreset.allCases) { preset in
@@ -150,18 +150,18 @@ struct GeneralSettingsView: View {
             .pickerStyle(.segmented)
 
             sliderRow(
-                title: "Suppression Strength",
+                title: "除去の強さ",
                 value: "\(Int(audioModel.suppressionStrength * 100))%",
-                help: "How much noise to remove. Lower keeps more of your original sound."
+                help: "ノイズをどれだけ除去するか。低くすると元の音がより残ります。"
             ) {
                 Slider(value: $audioModel.suppressionStrength, in: 0...1).tint(.accentColor)
             }
 
             sliderRow(
-                title: "Reduction Limit",
+                title: "除去量の上限",
                 value: audioModel.attenuationLimitDb >= VoicePreset.maxAttenuationDb
-                    ? "Max" : "\(Int(audioModel.attenuationLimitDb)) dB",
-                help: "Caps how much background is removed so your voice keeps a natural tone. Higher = more aggressive."
+                    ? "最大" : "\(Int(audioModel.attenuationLimitDb)) dB",
+                help: "背景音の除去量に上限を設け、声の自然さを保ちます。高いほど強くかかります。"
             ) {
                 Slider(value: $audioModel.attenuationLimitDb,
                        in: VoicePreset.minAttenuationDb...VoicePreset.maxAttenuationDb).tint(.accentColor)
@@ -171,8 +171,8 @@ struct GeneralSettingsView: View {
 
             Toggle(isOn: $audioModel.voicePolishEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Voice Polish").font(.subheadline)
-                    Text("Tone + leveling for podcasts & tutorials. Off in Meeting mode.")
+                    Text("声の仕上げ").font(.subheadline)
+                    Text("ポッドキャストや講座向けのトーン調整とレベリング。モードに関係なく、このスイッチでON/OFFできます。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -182,7 +182,7 @@ struct GeneralSettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Broadcast Voice").font(.subheadline)
+                Text("声のクリア化").font(.subheadline)
                 Picker("", selection: $audioModel.clarityLevel) {
                     ForEach(ClarityLevel.allCases) { level in
                         Text(level.label).tag(level)
@@ -190,7 +190,7 @@ struct GeneralSettingsView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                Text("Adds studio presence and clarity while keeping your natural voice — sibilance is tamed automatically, so “crisp” never turns harsh.")
+                Text("自然な声を保ったまま、スタジオ品質の存在感とクリアさを加えます。歯擦音は自動で抑えられるため、クリアさが耳に刺さることはありません。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -198,7 +198,7 @@ struct GeneralSettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Mouth Noise").font(.subheadline)
+                Text("リップノイズ除去").font(.subheadline)
                 Picker("", selection: $audioModel.mouthNoiseLevel) {
                     ForEach(MouthNoiseLevel.allCases) { level in
                         Text(level.label).tag(level)
@@ -206,7 +206,7 @@ struct GeneralSettingsView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                Text("Tames P-pops and lip-smacks. De-plosive ducks low-band thumps; de-click masks short mouth clicks. Off = no processing added.")
+                Text("破裂音や口の雑音を抑えます。De-plosiveが低音のドスッという音を、De-clickが短いクリック音を抑えます。オフの場合は処理は加わりません。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -219,7 +219,7 @@ struct GeneralSettingsView: View {
     private var inputVolumeCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                sectionHeader("Input Volume", systemImage: "mic.fill")
+                sectionHeader("入力音量", systemImage: "mic.fill")
                 Spacer()
                 Text("\(Int(audioModel.inputVolumeValue * 100))%")
                     .font(.callout)
@@ -233,26 +233,26 @@ struct GeneralSettingsView: View {
                 Image(systemName: "mic.fill").foregroundColor(.secondary).font(.caption)
             }
 
-            Text("Lowers your mic before NoNoise processing. Use this if your voice sounds clipped, crushed, or too loud even when speaking normally.")
+            Text("NoNoiseの処理前にマイクの音量を下げます。普通に話しているのに声が割れる、潰れる、大きすぎると感じる場合に使ってください。")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
             HStack {
                 Spacer()
-                Button("Reset to 80%") {
+                Button("80%にリセット") {
                     withAnimation { audioModel.inputVolumeValue = SmartLevelController.defaultInputVolume }
                 }
                 .controlSize(.small)
             }
 
             if meterModel.isSourceMicClipping {
-                Label("Source mic is clipping before NoNoise. Lower macOS/device input volume if available.",
+                Label("NoNoiseの処理前にマイクの入力がクリップしています。可能ならmacOS/デバイスの入力音量を下げてください。",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.orange)
             }
             if meterModel.isInputNearCeiling {
-                Label("Input too loud", systemImage: "exclamationmark.triangle.fill")
+                Label("入力音量が大きすぎます", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.orange)
             }
@@ -261,8 +261,8 @@ struct GeneralSettingsView: View {
 
             Toggle(isOn: $audioModel.smartLevelEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Smart Level").font(.subheadline)
-                    Text("Automatically lowers Input Volume or Output Gain when your voice repeatedly hits the ceiling.")
+                    Text("自動レベル調整").font(.subheadline)
+                    Text("声が繰り返し上限に達すると、入力音量または出力音量を自動的に下げます。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -281,20 +281,20 @@ struct GeneralSettingsView: View {
     private var profilesCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                sectionHeader("Voice Profiles", systemImage: "person.crop.rectangle.stack")
+                sectionHeader("設定プロファイル", systemImage: "person.crop.rectangle.stack")
                 Spacer()
                 Button {
                     newProfileName = ""
                     isShowingSaveSheet = true
                 } label: {
-                    Label("Save Current", systemImage: "plus")
+                    Label("現在の設定を保存", systemImage: "plus")
                         .font(.caption)
                 }
                 .controlSize(.small)
             }
 
             if audioModel.profiles.isEmpty {
-                Text("No profiles saved yet. Dial in your settings and tap \"Save Current\".")
+                Text("まだプロファイルが保存されていません。設定を調整して「現在の設定を保存」をタップしてください。")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -325,7 +325,7 @@ struct GeneralSettingsView: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
-            Button("Recall") {
+            Button("呼び出す") {
                 audioModel.applyProfile(profile)
             }
             .controlSize(.small)
@@ -338,7 +338,7 @@ struct GeneralSettingsView: View {
                 Image(systemName: "pencil")
             }
             .controlSize(.small)
-            .help("Rename this profile")
+            .help("このプロファイルの名前を変更")
             .popover(isPresented: Binding(
                 get: { renameTargetID == profile.id },
                 set: { if !$0 { renameTargetID = nil } }
@@ -352,26 +352,26 @@ struct GeneralSettingsView: View {
                 Image(systemName: "trash")
             }
             .controlSize(.small)
-            .help("Delete this profile")
+            .help("このプロファイルを削除")
         }
     }
 
     private var saveProfileSheet: some View {
         VStack(spacing: 16) {
-            Text("Save Profile")
+            Text("プロファイルを保存")
                 .font(.headline)
-            Text("Name this snapshot of your current settings.")
+            Text("現在の設定のスナップショットに名前を付けてください。")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            TextField("Profile name", text: $newProfileName)
+            TextField("プロファイル名", text: $newProfileName)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 260)
                 .onSubmit { commitSave() }
             HStack {
-                Button("Cancel") { isShowingSaveSheet = false }
+                Button("キャンセル") { isShowingSaveSheet = false }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Save") { commitSave() }
+                Button("保存") { commitSave() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(newProfileName.trimmingCharacters(in: .whitespaces).isEmpty)
             }
@@ -382,7 +382,7 @@ struct GeneralSettingsView: View {
 
     private func renamePopover(for profile: VoiceProfile) -> some View {
         HStack(spacing: 8) {
-            TextField("New name", text: $renameText)
+            TextField("新しい名前", text: $renameText)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 160)
                 .onSubmit { commitRename(id: profile.id) }
@@ -412,7 +412,7 @@ struct GeneralSettingsView: View {
     private var gainCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                sectionHeader("Output Gain", systemImage: "speaker.wave.2.fill")
+                sectionHeader("出力音量", systemImage: "speaker.wave.2.fill")
                 Spacer()
                 Text("\(Int(audioModel.outputGainValue * 100))%")
                     .font(.callout)
@@ -426,19 +426,19 @@ struct GeneralSettingsView: View {
                 Image(systemName: "speaker.wave.3.fill").foregroundColor(.secondary).font(.caption)
             }
 
-            Text("Boost the volume if the noise suppression makes your voice too quiet.")
+            Text("ノイズ除去で声が小さくなったときに音量を持ち上げます。")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
             if meterModel.isOutputClipping {
-                Label("Output clipping", systemImage: "exclamationmark.triangle.fill")
+                Label("出力が音割れしています", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.orange)
             }
 
             HStack {
                 Spacer()
-                Button("Reset to 100%") {
+                Button("100%に戻す") {
                     withAnimation { audioModel.outputGainValue = 1.0 }
                 }
                 .controlSize(.small)
@@ -451,12 +451,12 @@ struct GeneralSettingsView: View {
 
     private var incomingCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("Clean Incoming / Guest", systemImage: "person.wave.2.fill")
+            sectionHeader("相手の音声もクリアに（全システム）", systemImage: "person.wave.2.fill")
 
             Toggle(isOn: $audioModel.incomingCleanupEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Clean the other side").font(.subheadline)
-                    Text("De-noise everyone you hear (guests/callers). Captures all system audio except NoNoise, cleans it, and plays to your current output — no loopback or extra setup.")
+                    Text("相手側の音声をノイズ除去").font(.subheadline)
+                    Text("聞こえてくる音声（通話相手やゲスト）のノイズを除去します。NoNoise以外の全システム音声を取り込んでクリアにし、いまの出力先へ再生します。追加設定は不要です。")
                         .font(.caption).foregroundColor(.secondary)
                 }
             }
@@ -474,10 +474,10 @@ struct GeneralSettingsView: View {
     /// Status line driven by the never-lying `incomingCleanupStatus` (not the raw persisted flag).
     private var incomingStatusCaption: String? {
         switch audioModel.incomingCleanupStatus {
-        case .unavailable: return "Requires macOS 14.4 or later"
+        case .unavailable: return "macOS 14.4以降が必要です"
         case .off:         return nil
-        case .cleaning:    return "Cleaning all incoming audio"
-        case .failed:      return "Couldn’t start — allow audio capture in System Settings ▸ Privacy & Security"
+        case .cleaning:    return "受信音声をすべてノイズ除去中"
+        case .failed:      return "開始できませんでした — システム設定 ▸ プライバシーとセキュリティ で音声キャプチャを許可してください"
         }
     }
 
@@ -501,7 +501,7 @@ struct GeneralSettingsView: View {
     private var loudnessCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                sectionHeader("Loudness", systemImage: "speaker.wave.2.circle.fill")
+                sectionHeader("ラウドネス", systemImage: "speaker.wave.2.circle.fill")
                 Spacer()
                 Text(meterModel.integratedLUFS <= LoudnessMeter.silenceLUFS + 1
                      ? "— LUFS" : String(format: "%.1f LUFS", meterModel.integratedLUFS))
@@ -509,19 +509,19 @@ struct GeneralSettingsView: View {
             }
             Toggle(isOn: $audioModel.loudnessNormEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Normalize Loudness").font(.subheadline)
-                    Text("Gently rides gain toward a target level so you’re consistent across calls and recordings.")
+                    Text("音量の自動統一").font(.subheadline)
+                    Text("目標レベルに向けて音量をゆるやかに調整し、通話や録音のたびに音量がばらつくのを防ぎます。")
                         .font(.caption).foregroundColor(.secondary)
                 }
             }
             .toggleStyle(.switch)
-            Picker("Target", selection: $audioModel.loudnessTargetLUFS) {
+            Picker("目標", selection: $audioModel.loudnessTargetLUFS) {
                 Text("−14 LUFS (YouTube / Spotify)").tag(Float(-14))
                 Text("−16 LUFS (Apple Podcasts)").tag(Float(-16))
             }
             .pickerStyle(.menu)
             .disabled(!audioModel.loudnessNormEnabled)
-            Text("Peak-safe: a limiter caps the output just below clipping (≈ −1 dBFS). Loudness is K-weighted (ITU-R BS.1770); peak is sample-peak, not certified true-peak.")
+            Text("音割れ防止: リミッターが出力をクリップ直前（約 −1 dBFS）で抑えます。ラウドネスはK特性（ITU-R BS.1770）、ピークはサンプルピーク値です。")
                 .font(.caption2).foregroundColor(.secondary)
         }
         .nnCard()
@@ -530,8 +530,8 @@ struct GeneralSettingsView: View {
     private var resetCard: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                sectionHeader("Reset Settings", systemImage: "arrow.counterclockwise")
-                Text("Restore audio and device settings to defaults. Voice Profiles and Hotkeys are kept.")
+                sectionHeader("設定をリセット", systemImage: "arrow.counterclockwise")
+                Text("音声・デバイス設定を初期値に戻します。設定プロファイルとホットキーは残ります。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -539,7 +539,7 @@ struct GeneralSettingsView: View {
             Button(role: .destructive) {
                 isShowingResetConfirmation = true
             } label: {
-                Label("Reset", systemImage: "arrow.counterclockwise")
+                Label("リセット", systemImage: "arrow.counterclockwise")
             }
             .controlSize(.small)
         }
@@ -554,13 +554,13 @@ struct GeneralSettingsView: View {
                 .foregroundColor(.secondary)
             Spacer()
             Link(destination: SupportLinks.reportIssueOrFeature) {
-                Label("Report Issue", systemImage: "exclamationmark.bubble")
+                Label("不具合を報告", systemImage: "exclamationmark.bubble")
             }
             .controlSize(.small)
             Button {
                 updaterController.checkForUpdates()
             } label: {
-                Label("Check for Updates", systemImage: "arrow.down.circle")
+                Label("アップデートを確認", systemImage: "arrow.down.circle")
             }
             .controlSize(.small)
             .disabled(!updaterController.canCheckForUpdates)
@@ -603,19 +603,19 @@ struct HotkeySettingsView: View {
     @State private var rebindingAction: HotkeyActionID?
 
     private let actionLabels: [(HotkeyActionID, String)] = [
-        (.toggleAI,        "Toggle Noise Cancellation"),
-        (.bypassMomentary, "A/B Bypass (hold for raw)"),
-        (.bypassToggle,    "A/B Bypass (toggle)"),
-        (.presetNext,      "Preset → Next"),
-        (.presetPrev,      "Preset → Previous"),
-        (.clarityNext,     "Broadcast Voice → Next Level"),
-        (.gainUp,          "Output Gain +"),
-        (.gainDown,        "Output Gain −"),
+        (.toggleAI,        "ノイズ除去のON/OFF"),
+        (.bypassMomentary, "A/B聴き比べ（押している間だけ元音声）"),
+        (.bypassToggle,    "A/B聴き比べ（切り替え）"),
+        (.presetNext,      "モード → 次へ"),
+        (.presetPrev,      "モード → 前へ"),
+        (.clarityNext,     "声のクリア化 → 次のレベル"),
+        (.gainUp,          "出力音量 +"),
+        (.gainDown,        "出力音量 −"),
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Global Hotkeys")
+            Text("グローバルホットキー")
                 .font(.title3).fontWeight(.semibold)
                 .padding(.bottom, 12)
 
@@ -627,7 +627,7 @@ struct HotkeySettingsView: View {
             if !manager.conflictedActions.isEmpty {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
-                    Text("Some hotkeys conflict with another app. Rebind them or change the conflicting app's shortcuts.")
+                    Text("一部のホットキーが他のアプリと競合しています。割り当てを変えるか、競合アプリ側のショートカットを変更してください。")
                         .font(.caption).foregroundColor(.secondary)
                 }
                 .padding(.top, 10)
@@ -645,7 +645,7 @@ struct HotkeySettingsView: View {
             Spacer()
             if manager.conflictedActions.contains(id) {
                 Image(systemName: "exclamationmark.circle.fill").foregroundColor(.orange)
-                    .help("This combo is in use by another app")
+                    .help("このキー操作は他のアプリが使用中です")
             }
             if let b = manager.bindings[id] {
                 Text(hotkeyDisplayString(b))
@@ -654,7 +654,7 @@ struct HotkeySettingsView: View {
             } else {
                 Text("—").foregroundColor(.secondary)
             }
-            Button("Edit") { rebindingAction = id }
+            Button("変更") { rebindingAction = id }
                 .controlSize(.small)
         }
         .padding(.vertical, 6)
@@ -696,7 +696,7 @@ struct RebindSheet: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("Press a new key combo for:")
+            Text("新しいキー操作を押してください:")
             Text(actionID.id.replacingOccurrences(of: "mv.hotkey.", with: ""))
                 .font(.headline)
             KeyCaptureView { binding in
@@ -706,15 +706,15 @@ struct RebindSheet: View {
             .frame(width: 200, height: 44)
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 1.5))
             if let b = capturedBinding {
-                Text("New: \(b.encoded)").font(.caption).foregroundColor(.secondary)
+                Text("新しい割り当て: \(b.encoded)").font(.caption).foregroundColor(.secondary)
             }
             if conflict {
-                Text("That combo is in use by another app.").foregroundColor(.orange).font(.caption)
+                Text("そのキー操作は他のアプリが使用中です。").foregroundColor(.orange).font(.caption)
             }
             HStack {
-                Button("Cancel") { dismiss() }
+                Button("キャンセル") { dismiss() }
                 Spacer()
-                Button("Save") {
+                Button("保存") {
                     if let b = capturedBinding {
                         let ok = manager.rebind(action: actionID, to: b)
                         if ok { dismiss() } else { conflict = true }
@@ -775,28 +775,28 @@ struct GuideView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Quick Setup")
+                Text("かんたんセットアップ")
                     .font(.headline)
                     .padding(.bottom, 2)
 
-                StepRow(number: 1, title: "Install NoNoise Mic",
-                        description: "Run ./build-driver.sh then sudo ./install-driver.sh once. This adds a 'NoNoise Mic' microphone that any app can select directly — no BlackHole needed.")
+                StepRow(number: 1, title: "NoNoise Mic をインストール",
+                        description: "./build-driver.sh → sudo ./install-driver.sh を一度だけ実行します。どのアプリからも選べる仮想マイク「NoNoise Mic」が追加されます（BlackHole不要）。")
                 Divider()
-                StepRow(number: 2, title: "Input: Your Microphone",
-                        description: "Select your real physical microphone (e.g. Built-in, USB Mic) as the Input Device. Output is automatic — cleaned audio is routed to the hidden 'NoNoise Mic Engine'; there is no Output Device to choose.")
+                StepRow(number: 2, title: "入力: 実際のマイクを選ぶ",
+                        description: "入力デバイスに物理マイク（内蔵マイクやUSBマイク）を選びます。出力は自動です — 処理済み音声は内部の「NoNoise Mic Engine」へ送られるため、出力デバイスを選ぶ必要はありません。")
                 Divider()
-                StepRow(number: 3, title: "Chat App: Pick 'NoNoise Mic'",
-                        description: "In Slack, Zoom, Meet, Discord, or OBS, set the Microphone to 'NoNoise Mic'.")
+                StepRow(number: 3, title: "通話アプリで「NoNoise Mic」を選ぶ",
+                        description: "Slack・Zoom・Meet・Discord・OBS などのマイク設定で「NoNoise Mic」を選択します。")
                 Divider()
-                StepRow(number: 4, title: "You're Live",
-                        description: "Noise cancellation is ON by default. Toggle it any time from the menu bar. Your voice is now crystal clear!")
+                StepRow(number: 4, title: "これで完了",
+                        description: "ノイズ除去は起動時からONです。メニューバーからいつでも切り替えられます。")
                 Divider()
-                StepRow(number: 5, title: "Clean the Guest (optional)",
-                        description: "To de-noise the people you HEAR, turn on Clean Incoming / Guest in Settings. NoNoise captures all system audio except itself, cleans it, and re-plays it to your current output automatically — no loopback or routing needed (requires macOS 14.4+).")
+                StepRow(number: 5, title: "相手の音声もクリアに（任意）",
+                        description: "聞こえてくる側のノイズも消したい場合は、設定で「相手の音声もクリアに」をONにします。追加の配線は不要です（macOS 14.4以降）。")
 
                 HStack {
                     Spacer()
-                    Label("No driver? Fallback: set the Output Device to 'BlackHole 2ch' and point your chat app's microphone at 'BlackHole 2ch' instead.",
+                    Label("ドライバを入れられない場合の代替: 出力デバイスを「BlackHole 2ch」にし、通話アプリのマイクにも「BlackHole 2ch」を選びます。",
                           systemImage: "lightbulb.fill")
                         .font(.caption)
                         .foregroundColor(.secondary)
