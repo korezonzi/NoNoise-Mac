@@ -15,6 +15,10 @@ public enum ControlAction: Equatable, Sendable {
     case clarityNext
     case gainUp
     case gainDown
+    /// One-click everything (menu-bar right-click "Turn All On/Off"): mic NC + whichever
+    /// receive-side backend (speaker/incoming cleanup) is relevant. See `ControlReducer`'s
+    /// `.toggleAll` case for the exact on/off semantics.
+    case toggleAll
 
     // Gain nudge + clamp values. These MUST match the Settings → General "Output Gain"
     // slider range (0.5...4.0 in SettingsView.gainCard) so a nudge never lands outside
@@ -35,6 +39,7 @@ public enum ControlAction: Equatable, Sendable {
         let sub = url.pathComponents.dropFirst().first?.lowercased() ?? ""
         switch (host, sub) {
         case ("toggle", _):       return .toggleAI
+        case ("toggle-all", _):   return .toggleAll
         case ("bypass", _):       return .bypassToggle
         case ("preset", "next"):  return .presetNext
         case ("preset", "prev"):  return .presetPrev
@@ -51,6 +56,7 @@ public enum ControlAction: Equatable, Sendable {
     public static func from(cliVerb verb: String) -> ControlAction? {
         switch verb.lowercased() {
         case "toggle":       return .toggleAI
+        case "toggle-all":   return .toggleAll
         case "bypass":       return .bypassToggle
         case "preset-next":  return .presetNext
         case "preset-prev":  return .presetPrev
@@ -70,6 +76,7 @@ public enum ControlAction: Equatable, Sendable {
     public var urlString: String? {
         switch self {
         case .toggleAI:     return "nonoisemac://toggle"
+        case .toggleAll:    return "nonoisemac://toggle-all"
         case .bypassToggle: return "nonoisemac://bypass"
         case .presetNext:   return "nonoisemac://preset/next"
         case .presetPrev:   return "nonoisemac://preset/prev"
@@ -192,6 +199,18 @@ public struct HotkeyBinding: Equatable, Sendable {
     }()
 }
 
+// MARK: - ReceivingCleanupMode
+
+/// Which receive-side ("clean the other side") backend a `.toggleAll` restore should turn
+/// back on. Mirrors the two `AudioModel` backends (`speakerCleanupEnabled` /
+/// `incomingCleanupEnabled`) without Core depending on the App-layer `CleanIncomingMode`
+/// picker (`ContentView`) — that type is UI-only (which card mode is shown); this one is the
+/// reducer's memory of which backend was actually enabled.
+public enum ReceivingCleanupMode: Equatable, Sendable {
+    case speaker
+    case incoming
+}
+
 // MARK: - ControlState
 
 /// A pure snapshot of the control-layer-relevant state. The App-side adapter reads this
@@ -205,19 +224,36 @@ public struct ControlState: Equatable, Sendable {
     public var preset: VoicePreset
     public var clarity: ClarityLevel
     public var gain: Float
+    /// Mirrors `AudioModel.speakerCleanupEnabled` / `.incomingCleanupEnabled`. AudioModel
+    /// already enforces mutual exclusion between the two (`SpeakerTapLogic.shouldForceOtherOff`)
+    /// so in practice at most one is true at a time, but `ControlState` stores both plainly —
+    /// same pattern as `preset`/`clarity`/`gain`, re-synced from the model on every dispatch.
+    public var speakerCleanupEnabled: Bool
+    public var incomingCleanupEnabled: Bool
+    /// Session-only memory of which receive-side backend was last turned off by `.toggleAll`,
+    /// so a following `.toggleAll` restores the SAME backend rather than guessing. Never
+    /// persisted (same rule as the bypass flags) — `nil` means "never toggled off via
+    /// `.toggleAll` this session", which `.toggleAll` treats as "default to speaker".
+    public var lastReceivingCleanupMode: ReceivingCleanupMode?
 
     public init(desiredAI: Bool = true,
                 isBypassedMomentary: Bool = false,
                 isBypassedToggle: Bool = false,
                 preset: VoicePreset = .meeting,
                 clarity: ClarityLevel = .off,
-                gain: Float = 1.0) {
+                gain: Float = 1.0,
+                speakerCleanupEnabled: Bool = false,
+                incomingCleanupEnabled: Bool = false,
+                lastReceivingCleanupMode: ReceivingCleanupMode? = nil) {
         self.desiredAI = desiredAI
         self.isBypassedMomentary = isBypassedMomentary
         self.isBypassedToggle = isBypassedToggle
         self.preset = preset
         self.clarity = clarity
         self.gain = gain
+        self.speakerCleanupEnabled = speakerCleanupEnabled
+        self.incomingCleanupEnabled = incomingCleanupEnabled
+        self.lastReceivingCleanupMode = lastReceivingCleanupMode
     }
 
     /// Effective bypass = momentary OR latched toggle.
@@ -225,6 +261,10 @@ public struct ControlState: Equatable, Sendable {
 
     /// What AudioModel.isAIEnabled should be: desired AI, suppressed while bypassed.
     public var effectiveAI: Bool { desiredAI && !isBypassed }
+
+    /// Either receive-side backend enabled. Drives `.toggleAll` and the menu-bar icon's
+    /// "anything active" state alongside `effectiveAI`.
+    public var receivingCleanupEnabled: Bool { speakerCleanupEnabled || incomingCleanupEnabled }
 }
 
 // MARK: - ControlMutation
@@ -246,6 +286,11 @@ public enum ControlMutation: Equatable, Sendable {
     /// Write `AudioModel.outputGainValue`. The existing `onKnobChanged()` flip to `.custom` is
     /// the INTENDED behavior for a manual gain nudge (same as dragging the Settings slider).
     case setGain(Float)
+    /// Write `AudioModel.speakerCleanupEnabled`. AudioModel's own `didSet` handles mutual
+    /// exclusion with `incomingCleanupEnabled` — the adapter just forwards the value.
+    case setSpeakerCleanup(Bool)
+    /// Write `AudioModel.incomingCleanupEnabled`. Same mutual-exclusion note as above.
+    case setIncomingCleanup(Bool)
 }
 
 // MARK: - ControlReducer
@@ -308,6 +353,40 @@ public enum ControlReducer {
         case .gainDown:
             s.gain = max(s.gain - ControlAction.gainStep, ControlAction.gainMin)
             mutations.append(.setGain(s.gain))
+
+        case .toggleAll:
+            // One-click everything. ANY side already on — mic NC (checked via the CURRENT
+            // effective value, so bypass and the menu-bar icon/label agree) OR either
+            // receive-side backend — turns EVERYTHING off. When everything is already off,
+            // turn mic NC back on plus whichever receive-side backend was active before the
+            // last all-off (defaulting to speaker cleanup — the more common backend — when no
+            // prior mode is known, e.g. first launch or receive-side cleanup was never used).
+            if s.effectiveAI || s.receivingCleanupEnabled {
+                if s.incomingCleanupEnabled {
+                    s.lastReceivingCleanupMode = .incoming
+                } else if s.speakerCleanupEnabled {
+                    s.lastReceivingCleanupMode = .speaker
+                }
+                s.desiredAI = false
+                if s.speakerCleanupEnabled {
+                    s.speakerCleanupEnabled = false
+                    mutations.append(.setSpeakerCleanup(false))
+                }
+                if s.incomingCleanupEnabled {
+                    s.incomingCleanupEnabled = false
+                    mutations.append(.setIncomingCleanup(false))
+                }
+            } else {
+                s.desiredAI = true
+                switch s.lastReceivingCleanupMode ?? .speaker {
+                case .speaker:
+                    s.speakerCleanupEnabled = true
+                    mutations.append(.setSpeakerCleanup(true))
+                case .incoming:
+                    s.incomingCleanupEnabled = true
+                    mutations.append(.setIncomingCleanup(true))
+                }
+            }
         }
 
         // Emit an effective-AI write ONLY when it actually changed (toggle + bypass actions).

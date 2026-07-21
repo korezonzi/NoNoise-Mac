@@ -50,10 +50,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem.button {
             button.image = NoNoiseLogoImage.menuBar(isActive: model.isAIEnabled)
             button.target = self
-            button.action = #selector(togglePopover(_:))
+            button.action = #selector(handleStatusItemClick(_:))
+            // Left click opens the popover (existing behavior); right click pops up the
+            // context menu (Turn All On/Off, Open Controls, Quit) — see handleStatusItemClick.
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        // Keep the icon's active tint in sync with the AI toggle (was the MenuBarExtra label binding).
-        iconCancellable = model.$isAIEnabled
+        // Keep the icon's active tint in sync with mic NC OR either receive-side cleanup backend
+        // (was AI-only; extended so the icon reflects "is anything running" at a glance — was the
+        // MenuBarExtra label binding).
+        iconCancellable = Publishers.CombineLatest3(
+                model.$isAIEnabled,
+                model.$speakerCleanupEnabled,
+                model.$incomingCleanupEnabled
+            )
+            .map { aiEnabled, speakerEnabled, incomingEnabled in
+                aiEnabled || speakerEnabled || incomingEnabled
+            }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] active in
                 self?.statusItem.button?.image = NoNoiseLogoImage.menuBar(isActive: active)
@@ -69,6 +81,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ))
     }
 
+    /// Single `button.action` target for both click kinds (registered via `sendAction(on:)`
+    /// above). AppKit doesn't route right vs. left click to different selectors on its own, so
+    /// we inspect `NSApp.currentEvent` — the event that triggered this action — to branch.
+    @objc private func handleStatusItemClick(_ sender: Any?) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            showStatusMenu()
+        } else {
+            togglePopover(sender)
+        }
+    }
+
     @objc private func togglePopover(_ sender: Any?) {
         guard let button = statusItem.button else { return }
         if popover.isShown {
@@ -78,6 +101,71 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             popover.contentViewController?.view.window?.makeKey()
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// Right-click context menu: one-click all-on/off, open the popover, quit. Built fresh on
+    /// every right click so "Turn All On/Off" always reflects the CURRENT state.
+    ///
+    /// The menu is assigned to `statusItem.menu` only for the duration of this single click,
+    /// then cleared — a persistently-set `statusItem.menu` would make AppKit route LEFT clicks
+    /// through it too (bypassing `button.action`/`handleStatusItemClick` entirely), which would
+    /// silently break the left-click-opens-popover behavior.
+    private func showStatusMenu() {
+        guard let button = statusItem.button else { return }
+
+        let anyOn = audioModel.isAIEnabled || audioModel.speakerCleanupEnabled || audioModel.incomingCleanupEnabled
+
+        let menu = NSMenu()
+
+        let toggleAllItem = NSMenuItem(
+            title: anyOn ? "Turn All Off" : "Turn All On",
+            action: #selector(toggleAllFromMenu),
+            keyEquivalent: ""
+        )
+        toggleAllItem.target = self
+        menu.addItem(toggleAllItem)
+
+        menu.addItem(.separator())
+
+        let openControlsItem = NSMenuItem(
+            title: "Open Controls",
+            action: #selector(openControlsFromMenu),
+            keyEquivalent: ""
+        )
+        openControlsItem.target = self
+        menu.addItem(openControlsItem)
+
+        let quitItem = NSMenuItem(
+            title: "Quit NoNoise Mac",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: ""
+        )
+        quitItem.target = NSApp
+        menu.addItem(quitItem)
+
+        statusItem.menu = menu
+        button.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    @objc private func toggleAllFromMenu() {
+        dispatcher?.dispatch(.toggleAll)
+    }
+
+    /// "Open Controls" always SHOWS the popover (never toggles it closed) — distinct from the
+    /// left-click action, which does toggle.
+    @objc private func openControlsFromMenu() {
+        guard let button = statusItem.button, !popover.isShown else { return }
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Tear down live HAL pipelines and cancel any deferred engine start before the process
+        // dies — without this, an in-flight deferred speaker start could fire during teardown
+        // (audit finding), and a SIGTERM mid-IO leaves driver-side state for coreaudiod to clean.
+        audioModel?.shutdownCleanupEngines()
     }
 
     /// URL handler for `nonoisemac://` actions — live from launch, same as upstream.

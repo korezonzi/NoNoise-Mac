@@ -36,6 +36,10 @@ final class ControlLayerTests: XCTestCase {
         XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://gain/down")!), .gainDown)
     }
 
+    func testToggleAllURLParsed() {
+        XCTAssertEqual(ControlAction.from(url: URL(string: "nonoisemac://toggle-all")!), .toggleAll)
+    }
+
     func testUnknownURLReturnsNil() {
         XCTAssertNil(ControlAction.from(url: URL(string: "nonoisemac://unknown/verb")!))
     }
@@ -47,6 +51,7 @@ final class ControlLayerTests: XCTestCase {
     // MARK: - CLI verb parsing
 
     func testCLIVerbToggle()       { XCTAssertEqual(ControlAction.from(cliVerb: "toggle"), .toggleAI) }
+    func testCLIVerbToggleAll()    { XCTAssertEqual(ControlAction.from(cliVerb: "toggle-all"), .toggleAll) }
     func testCLIVerbBypass()       { XCTAssertEqual(ControlAction.from(cliVerb: "bypass"), .bypassToggle) }
     func testCLIVerbPresetNext()   { XCTAssertEqual(ControlAction.from(cliVerb: "preset-next"), .presetNext) }
     func testCLIVerbPresetPrev()   { XCTAssertEqual(ControlAction.from(cliVerb: "preset-prev"), .presetPrev) }
@@ -61,7 +66,7 @@ final class ControlLayerTests: XCTestCase {
     /// action via `from(url:)`. This is the guard against the CLI's emitted URL drifting from
     /// what the URL handler accepts (the CLI builds its URL from exactly this path).
     func testCLIVerbToURLRoundTrips() {
-        let verbs = ["toggle", "bypass", "preset-next", "preset-prev",
+        let verbs = ["toggle", "toggle-all", "bypass", "preset-next", "preset-prev",
                      "clarity-next", "gain-up", "gain-down"]
         for verb in verbs {
             guard let action = ControlAction.from(cliVerb: verb) else {
@@ -293,5 +298,92 @@ final class ControlLayerTests: XCTestCase {
         let s = ControlState(desiredAI: true)
         let (_, mutations) = ControlReducer.reduce(s, .bypassMomentaryDown)
         XCTAssertEqual(mutations, [.setAIEffective(false)])
+    }
+
+    // MARK: - ControlReducer: toggleAll (one-click everything)
+
+    /// Everything on (mic NC + speaker cleanup) → toggleAll turns EVERYTHING off, and remembers
+    /// speaker cleanup as the receiving mode to restore later.
+    func testToggleAllAllOnTurnsEverythingOff() {
+        let s = ControlState(desiredAI: true, speakerCleanupEnabled: true, incomingCleanupEnabled: false)
+        let (next, mutations) = ControlReducer.reduce(s, .toggleAll)
+        XCTAssertFalse(next.desiredAI)
+        XCTAssertFalse(next.effectiveAI)
+        XCTAssertFalse(next.speakerCleanupEnabled)
+        XCTAssertFalse(next.incomingCleanupEnabled)
+        XCTAssertEqual(next.lastReceivingCleanupMode, .speaker, "remembers which backend was on for restore")
+        XCTAssertTrue(mutations.contains(.setAIEffective(false)))
+        XCTAssertTrue(mutations.contains(.setSpeakerCleanup(false)))
+        XCTAssertFalse(mutations.contains(.setIncomingCleanup(false)),
+                       "incoming was already off — no redundant mutation")
+    }
+
+    /// Everything off, no prior toggleAll history → toggleAll turns mic NC + speaker cleanup on
+    /// (the documented default when no receiving mode is known).
+    func testToggleAllAllOffDefaultsToSpeakerWhenModeUnknown() {
+        let s = ControlState(desiredAI: false)
+        let (next, mutations) = ControlReducer.reduce(s, .toggleAll)
+        XCTAssertTrue(next.desiredAI)
+        XCTAssertTrue(next.effectiveAI)
+        XCTAssertTrue(next.speakerCleanupEnabled)
+        XCTAssertFalse(next.incomingCleanupEnabled)
+        XCTAssertEqual(mutations, [.setSpeakerCleanup(true), .setAIEffective(true)])
+    }
+
+    /// Everything off, but a PRIOR toggleAll remembered incoming cleanup was the active backend
+    /// → toggleAll restores mic NC + incoming cleanup specifically (not speaker).
+    func testToggleAllAllOffRestoresRememberedIncomingMode() {
+        let s = ControlState(desiredAI: false, lastReceivingCleanupMode: .incoming)
+        let (next, mutations) = ControlReducer.reduce(s, .toggleAll)
+        XCTAssertTrue(next.desiredAI)
+        XCTAssertTrue(next.incomingCleanupEnabled)
+        XCTAssertFalse(next.speakerCleanupEnabled)
+        XCTAssertEqual(mutations, [.setIncomingCleanup(true), .setAIEffective(true)])
+    }
+
+    /// Only mic NC is on (receiving side untouched) → toggleAll turns mic NC off and emits no
+    /// receiving-side mutations (nothing to turn off there).
+    func testToggleAllOnlyMicOnTurnsAllOff() {
+        let s = ControlState(desiredAI: true, speakerCleanupEnabled: false, incomingCleanupEnabled: false)
+        let (next, mutations) = ControlReducer.reduce(s, .toggleAll)
+        XCTAssertFalse(next.desiredAI)
+        XCTAssertEqual(mutations, [.setAIEffective(false)])
+        XCTAssertNil(next.lastReceivingCleanupMode, "nothing was on to remember on the receiving side")
+    }
+
+    /// Only receiving-side cleanup is on (mic NC already off) → toggleAll turns it off and emits
+    /// no AI mutation (effective AI was already false).
+    func testToggleAllOnlyReceivingOnTurnsAllOff() {
+        let s = ControlState(desiredAI: false, speakerCleanupEnabled: true)
+        let (next, mutations) = ControlReducer.reduce(s, .toggleAll)
+        XCTAssertFalse(next.speakerCleanupEnabled)
+        XCTAssertEqual(next.lastReceivingCleanupMode, .speaker)
+        XCTAssertEqual(mutations, [.setSpeakerCleanup(false)])
+    }
+
+    /// Full round trip: on (incoming) → off → on again restores the SAME backend (incoming),
+    /// not the default (speaker).
+    func testToggleAllRoundTripPreservesReceivingMode() {
+        var s = ControlState(desiredAI: true, incomingCleanupEnabled: true)
+        s = ControlReducer.reduce(s, .toggleAll).state   // all off
+        XCTAssertFalse(s.effectiveAI)
+        XCTAssertFalse(s.incomingCleanupEnabled)
+        s = ControlReducer.reduce(s, .toggleAll).state   // restore
+        XCTAssertTrue(s.effectiveAI)
+        XCTAssertTrue(s.incomingCleanupEnabled)
+        XCTAssertFalse(s.speakerCleanupEnabled, "restores incoming specifically, not the speaker default")
+    }
+
+    /// toggleAll checks the CURRENT EFFECTIVE AI (bypass-aware), matching what the menu-bar icon
+    /// and menu label show. While bypassed, effective AI already reads as off, so a receiving-side
+    /// backend turning on does not also flip desiredAI on again unnecessarily — it was already on.
+    func testToggleAllWhileBypassedTurningReceivingOnEmitsNoRedundantAIMutation() {
+        let s = ControlState(desiredAI: true, isBypassedToggle: true)
+        XCTAssertFalse(s.effectiveAI, "bypassed: effective AI already off despite desiredAI true")
+        let (next, mutations) = ControlReducer.reduce(s, .toggleAll)
+        XCTAssertTrue(next.desiredAI)
+        XCTAssertTrue(next.speakerCleanupEnabled)
+        XCTAssertEqual(mutations, [.setSpeakerCleanup(true)],
+                       "effective AI unchanged (still bypassed) — no .setAIEffective mutation")
     }
 }

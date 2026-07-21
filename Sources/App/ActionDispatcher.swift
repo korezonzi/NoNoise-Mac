@@ -31,7 +31,9 @@ public final class ActionDispatcher: ObservableObject {
         self.state = ControlState(desiredAI: model.isAIEnabled,
                                   preset: model.selectedPreset,
                                   clarity: model.clarityLevel,
-                                  gain: model.outputGainValue)
+                                  gain: model.outputGainValue,
+                                  speakerCleanupEnabled: model.speakerCleanupEnabled,
+                                  incomingCleanupEnabled: model.incomingCleanupEnabled)
     }
 
     /// The popover master toggle binds to this instead of `$audioModel.isAIEnabled` (finding #2),
@@ -69,10 +71,13 @@ public final class ActionDispatcher: ObservableObject {
         // Re-sync the value-knob fields from the model so concurrent UI edits aren't lost.
         // `desiredAI` and the bypass flags are owned by the reducer and intentionally NOT
         // re-read here — while bypassed, model.isAIEnabled is forced false and would corrupt
-        // `desiredAI` if read back.
+        // `desiredAI` if read back. `lastReceivingCleanupMode` is likewise reducer-owned
+        // session memory (see ControlLayer.swift) and never re-read from the model.
         state.preset = model.selectedPreset
         state.clarity = model.clarityLevel
         state.gain = model.outputGainValue
+        state.speakerCleanupEnabled = model.speakerCleanupEnabled
+        state.incomingCleanupEnabled = model.incomingCleanupEnabled
         if !state.isBypassed {
             // When not bypassed, model.isAIEnabled IS the desired value — keep them in sync
             // so a UI toggle is reflected before a hotkey toggle.
@@ -87,10 +92,12 @@ public final class ActionDispatcher: ObservableObject {
         // been suppressed by the reducer — there is never both .setPreset and .setGain in one list.
         for mutation in mutations {
             switch mutation {
-            case .setPreset(let preset):    model.selectedPreset = preset
-            case .setClarity(let clarity):  model.clarityLevel = clarity
-            case .setGain(let gain):        model.outputGainValue = gain
-            case .setAIEffective(let on):   model.isAIEnabled = on
+            case .setPreset(let preset):         model.selectedPreset = preset
+            case .setClarity(let clarity):       model.clarityLevel = clarity
+            case .setGain(let gain):             model.outputGainValue = gain
+            case .setAIEffective(let on):        model.isAIEnabled = on
+            case .setSpeakerCleanup(let on):     model.speakerCleanupEnabled = on
+            case .setIncomingCleanup(let on):    model.incomingCleanupEnabled = on
             }
         }
 

@@ -9,6 +9,14 @@ struct ContentView: View {
     @ObservedObject var updaterController: UpdaterController
     @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
 
+    /// UI-only selector between the two receive-side cleanup backends the "Clean Incoming" card
+    /// exposes (`AudioModel.speakerCleanupEnabled` vs `.incomingCleanupEnabled`). Core already
+    /// enforces mutual exclusion between the two (see `SpeakerTapLogic.shouldForceOtherOff`), so
+    /// this state only decides which mode's toggle/status the card currently shows — switching it
+    /// never itself enables or disables anything. Synced to whichever backend is actually active
+    /// on card appear so re-opening the popover reflects real state.
+    @State private var cleanIncomingMode: CleanIncomingMode = .speaker
+
     var body: some View {
         VStack(spacing: 14) {
             header
@@ -161,30 +169,119 @@ struct ContentView: View {
 
     // MARK: - Clean incoming / guest
 
+    /// The two receive-side cleanup modes offered by the card, mapped 1:1 to the two Core backends.
+    /// Mirrors the `Identifiable` + `label` convention used by `VoicePreset` / `ClarityLevel` /
+    /// `MouthNoiseLevel`, but kept private to the App layer — this is a UI grouping, not a Core
+    /// concept (Core exposes the two backends as independent, mutually-exclusive flags).
+    private enum CleanIncomingMode: String, CaseIterable, Identifiable {
+        case speaker
+        case allSystem
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .speaker:   return "Calls only (recommended)"
+            case .allSystem: return "All system audio"
+            }
+        }
+
+        /// Always-visible description of what the selected mode does, shown under the picker.
+        var caption: String {
+            switch self {
+            case .speaker:
+                return "Set your call app's output to “NoNoise Speaker” to clean only the other person's voice. In Meet: browser Settings ▸ Audio ▸ Speakers."
+            case .allSystem:
+                return "Cleans everything you hear on this Mac, including music."
+            }
+        }
+    }
+
     private var incomingCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 cardLabel("Clean Incoming", systemImage: "person.wave.2.fill")
                 Spacer()
-                Toggle("", isOn: $audioModel.incomingCleanupEnabled)
+                Toggle("", isOn: cleanIncomingEnabledBinding)
                     .labelsHidden().toggleStyle(.switch)
-                    .disabled(!audioModel.isIncomingCleanupAvailable)
+                    .disabled(!isCleanIncomingModeAvailable)
             }
-            if let caption = incomingStatusCaption {
+
+            Picker("", selection: $cleanIncomingMode) {
+                ForEach(CleanIncomingMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+
+            Text(cleanIncomingMode.caption)
+                .font(.caption2).foregroundColor(.secondary)
+
+            if let caption = cleanIncomingStatusCaption {
                 Text(caption)
                     .font(.caption2).foregroundColor(.secondary)
             }
+
+            // Setup-forgot guard: the driver/tap alone can't clean anything for the speaker path
+            // until the user also flips their call app's own output device — surface a nudge for
+            // as long as we're genuinely running so it isn't missed after the toggle is flipped.
+            if cleanIncomingMode == .speaker, audioModel.speakerCleanupStatus == .cleaning {
+                Text("Don’t forget: choose “NoNoise Speaker” as the speaker in your call app.")
+                    .font(.caption2).foregroundColor(.orange)
+            }
         }
         .nnCard()
+        .onAppear { syncCleanIncomingModeToActiveBackend() }
     }
 
-    /// Status line driven by the never-lying `incomingCleanupStatus` (not the raw persisted flag).
-    private var incomingStatusCaption: String? {
-        switch audioModel.incomingCleanupStatus {
-        case .unavailable: return "Requires macOS 14.4 or later"
-        case .off:         return nil
-        case .cleaning:    return "Cleaning all incoming audio"
-        case .failed:      return "Couldn’t start — allow audio capture in System Settings ▸ Privacy & Security"
+    /// Single ON/OFF toggle targeting whichever backend `cleanIncomingMode` currently selects.
+    /// Switching the mode itself never enables/disables anything — Core's mutual exclusion
+    /// (`SpeakerTapLogic.shouldForceOtherOff`) handles turning the other backend off automatically
+    /// when this toggle is used, so no special exclusion handling is needed here.
+    private var cleanIncomingEnabledBinding: Binding<Bool> {
+        switch cleanIncomingMode {
+        case .speaker:   return $audioModel.speakerCleanupEnabled
+        case .allSystem: return $audioModel.incomingCleanupEnabled
+        }
+    }
+
+    private var isCleanIncomingModeAvailable: Bool {
+        switch cleanIncomingMode {
+        case .speaker:   return audioModel.isSpeakerCleanupAvailable
+        case .allSystem: return audioModel.isIncomingCleanupAvailable
+        }
+    }
+
+    /// Status line for the selected mode, driven by the never-lying `*CleanupStatus` (not the raw
+    /// persisted flag) — same contract for both backends.
+    private var cleanIncomingStatusCaption: String? {
+        switch cleanIncomingMode {
+        case .speaker:
+            switch audioModel.speakerCleanupStatus {
+            case .unavailable: return "Requires the NoNoise driver"
+            case .off:         return nil
+            case .cleaning:    return "Cleaning the call app’s audio"
+            case .failed:      return "Couldn’t start — toggle off and on to retry"
+            }
+        case .allSystem:
+            switch audioModel.incomingCleanupStatus {
+            case .unavailable: return "Requires macOS 14.4 or later"
+            case .off:         return nil
+            case .cleaning:    return "Cleaning all incoming audio"
+            case .failed:      return "Couldn’t start — allow audio capture in System Settings ▸ Privacy & Security"
+            }
+        }
+    }
+
+    /// Reflects the card's mode selector to whichever backend is actually enabled, so re-opening
+    /// the popover shows real state instead of always defaulting back to "Calls only". No-ops (stays
+    /// on the recommended speaker mode) when neither backend is enabled.
+    private func syncCleanIncomingModeToActiveBackend() {
+        if audioModel.incomingCleanupEnabled {
+            cleanIncomingMode = .allSystem
+        } else if audioModel.speakerCleanupEnabled {
+            cleanIncomingMode = .speaker
         }
     }
 

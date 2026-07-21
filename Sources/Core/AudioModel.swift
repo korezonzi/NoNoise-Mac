@@ -810,6 +810,21 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         UserDefaults.standard.set(speakerCleanupEnabled, forKey: PrefKey.speakerEnabled)
     }
 
+    /// Called from applicationWillTerminate: tear down the live cleanup pipelines WITHOUT touching
+    /// the persisted toggles (the user's on/off choice must survive relaunch), and invalidate any
+    /// in-flight deferred speaker start (audit finding: a deferred start firing during app teardown
+    /// would call AudioDeviceStart mid-HAL-teardown). Intentionally does NOT go through the
+    /// `speakerCleanupEnabled`/`incomingCleanupEnabled` setters — those persist their new value.
+    public func shutdownCleanupEngines() {
+        speakerApplyGeneration &+= 1   // drop any deferred start still queued on the run loop
+        speakerEngine?.stop()
+        speakerEngine = nil
+        if #available(macOS 14.4, *) {
+            (incomingEngine as? IncomingCleanupEngine)?.stop()
+        }
+        incomingEngine = nil
+    }
+
     /// Resolve a device UID to its AudioObjectID via the HAL. Works for INPUT-only devices too
     /// (unlike the output-scoped scan), so it's how we detect the visible "NoNoise Mic".
     private func deviceID(forUID uid: String) -> AudioObjectID {
