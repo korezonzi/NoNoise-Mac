@@ -49,6 +49,18 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     @Published public var incomingCleanupEnabled: Bool = false {
         didSet {
             guard !isApplyingPreset else { return }
+            // Mutual exclusion: Incoming Cleanup and Speaker Cleanup both render their own
+            // AVAudioEngine to the CURRENT DEFAULT OUTPUT — running both at once double-plays
+            // cleaned audio. Turning this ON forces Speaker Cleanup off first. The reentrancy guard
+            // (`isApplyingMutualExclusion`) prevents the resulting `speakerCleanupEnabled` didSet from
+            // bouncing back into this one. See `SpeakerTapLogic.shouldForceOtherOff` for the pure
+            // (unit-tested) decision this mirrors.
+            if !isApplyingMutualExclusion,
+               SpeakerTapLogic.shouldForceOtherOff(turningOn: incomingCleanupEnabled, otherEnabled: speakerCleanupEnabled) {
+                isApplyingMutualExclusion = true
+                speakerCleanupEnabled = false
+                isApplyingMutualExclusion = false
+            }
             applyIncomingCleanup()
             persistIncomingSettings()
         }
@@ -63,6 +75,37 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     public var isIncomingCleanupAvailable: Bool {
         if #available(macOS 14.4, *) { return true } else { return false }
     }
+
+    // Speaker Cleanup (clean incoming via the virtual "NoNoise Speaker" device) — a SINGLE toggle,
+    // sibling feature to Incoming Cleanup above but reading the driver's hidden "NoNoise Speaker Tap"
+    // input directly instead of a system-wide process tap. No macOS-version gate (no process-tap API
+    // used) — availability instead depends on the driver exposing the speaker pair, checked via
+    // `SpeakerCleanupEngine.isDriverInstalled()`. Off by default; engine created only while enabled.
+    @Published public var speakerCleanupEnabled: Bool = false {
+        didSet {
+            guard !isApplyingPreset else { return }
+            if !isApplyingMutualExclusion,
+               SpeakerTapLogic.shouldForceOtherOff(turningOn: speakerCleanupEnabled, otherEnabled: incomingCleanupEnabled) {
+                isApplyingMutualExclusion = true
+                incomingCleanupEnabled = false
+                isApplyingMutualExclusion = false
+            }
+            applySpeakerCleanup()
+            persistSpeakerSettings()
+        }
+    }
+    /// Effective, never-lying state for the UI — mirrors `incomingCleanupStatus`.
+    @Published public private(set) var speakerCleanupStatus: SpeakerCleanupStatus = .off
+
+    /// Whether the driver currently exposes "NoNoise Speaker Tap". Re-resolved on demand (cheap HAL
+    /// UID translate) rather than cached, so it tracks driver install/uninstall without a restart.
+    public var isSpeakerCleanupAvailable: Bool {
+        SpeakerCleanupEngine.isDriverInstalled()
+    }
+
+    /// Reentrancy guard for the Incoming ⇄ Speaker Cleanup mutual-exclusion cascade above — prevents
+    /// the forced-off write on one toggle from re-triggering the other's own forcing logic.
+    private var isApplyingMutualExclusion = false
 
     // On-demand capture: when the virtual mic is installed we capture the real mic ONLY while a
     // consumer app is using "NoNoise Mic" (observed via kAudioDevicePropertyDeviceIsRunningSomewhere).
@@ -263,6 +306,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         static let inputVolume = SettingsResetPolicy.inputVolumeKey
         static let smartLevel = SettingsResetPolicy.smartLevelKey
         static let incomingEnabled = SettingsResetPolicy.incomingEnabledKey
+        static let speakerEnabled = SettingsResetPolicy.speakerEnabledKey
         static let profiles = SettingsResetPolicy.profilesKey   // Voice Profiles (JSON array)
         static let loudnessNorm = SettingsResetPolicy.loudnessNormKey
         static let loudnessTarget = SettingsResetPolicy.loudnessTargetKey
@@ -300,6 +344,13 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     // `AnyObject?` so AudioModel itself needn't be `@available(macOS 14.4,*)`: `IncomingCleanupEngine`
     // is gated and only ever constructed/cast inside `#available` blocks (see `applyIncomingCleanup`).
     private var incomingEngine: AnyObject?
+
+    // OPTIONAL — created only while Speaker Cleanup is enabled (same zero-cost-when-off rationale as
+    // `incomingEngine`). `SpeakerCleanupEngine` uses no macOS-14.4-only API, so unlike `incomingEngine`
+    // this is stored as its concrete type — no `AnyObject?` / `#available` indirection needed.
+    private var speakerEngine: SpeakerCleanupEngine?
+    // Invalidates deferred speaker-engine starts (see applySpeakerCleanup's run-loop-tick defer).
+    private var speakerApplyGeneration: UInt64 = 0
 
     public override init() {
         super.init()
@@ -560,6 +611,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         inputVolumeValue = SmartLevelController.defaultInputVolume
         smartLevelEnabled = false
         incomingCleanupEnabled = false
+        speakerCleanupEnabled = false
         loudnessNormEnabled = false
         loudnessTargetLUFS = -14
         isApplyingPreset = false
@@ -573,8 +625,10 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
 
         applyVoiceChain()
         applyIncomingCleanup()
+        applySpeakerCleanup()
         persistSettings()
         persistIncomingSettings()
+        persistSpeakerSettings()
     }
 
     private func loadSettings() {
@@ -593,6 +647,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             applyPreset(.meeting)
             applyVoiceChain()
             applyIncomingCleanup()   // feature off on first launch; sets status (.off or .unavailable)
+            applySpeakerCleanup()    // feature off on first launch; sets status (.off or .unavailable)
             return
         }
         // Load stored knob values (used as-is for .custom; overwritten below for
@@ -617,6 +672,16 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         // the didSet doesn't re-persist/reconfigure mid-load; the explicit applyIncomingCleanup()
         // below starts it if it was persisted enabled (and resolves the effective status).
         incomingCleanupEnabled = d.bool(forKey: PrefKey.incomingEnabled)
+        // Speaker Cleanup (off by default). Same isApplyingPreset-guarded restore as Incoming above —
+        // the didSet's mutual-exclusion cascade is suppressed here (isApplyingPreset), so a
+        // corrupt/hand-edited defaults file with BOTH persisted `true` is corrected explicitly below
+        // rather than relying on the didSet: without that correction `applyIncomingCleanup()` and
+        // `applySpeakerCleanup()` would both start their engines and double-render to the default
+        // output, exactly the bug mutual exclusion exists to prevent.
+        speakerCleanupEnabled = d.bool(forKey: PrefKey.speakerEnabled)
+        if incomingCleanupEnabled && speakerCleanupEnabled {
+            speakerCleanupEnabled = false   // Incoming wins; deterministic, matches load order below
+        }
         selectedPreset = preset
         isApplyingPreset = false
         if let p = preset.parameters {  // non-custom: preset defines the values
@@ -630,6 +695,8 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         applyVoiceChain()
         // Create the incoming engine once, only if the feature was persisted enabled (off → no-op).
         applyIncomingCleanup()
+        // Same for Speaker Cleanup (mutually exclusive with Incoming — see the correction above).
+        applySpeakerCleanup()
     }
 
     // MARK: - Incoming / guest cleanup lifecycle
@@ -680,6 +747,67 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
 
     private func persistIncomingSettings() {
         UserDefaults.standard.set(incomingCleanupEnabled, forKey: PrefKey.incomingEnabled)
+    }
+
+    // MARK: - Speaker Cleanup lifecycle
+
+    /// Create-or-tear-down the direct-hidden-input Speaker Cleanup engine to match
+    /// `speakerCleanupEnabled`, and publish the effective `speakerCleanupStatus`. Mirrors
+    /// `applyIncomingCleanup()`'s truthful-retention contract, but the availability gate is driver
+    /// presence (`SpeakerCleanupEngine.isDriverInstalled()`) instead of an OS version, and there is no
+    /// `#available` indirection since `SpeakerCleanupEngine` uses no macOS-14.4-only API.
+    private func applySpeakerCleanup() {
+        guard isSpeakerCleanupAvailable else {
+            // Driver doesn't expose "NoNoise Speaker Tap": never construct the engine; the toggle is
+            // disabled and shows "install the driver" (mirrors Incoming's OS-unavailable path).
+            speakerEngine?.stop()
+            speakerEngine = nil
+            speakerCleanupStatus = .unavailable
+            return
+        }
+        if speakerCleanupEnabled {
+            // Already genuinely running — don't rebuild on a redundant apply.
+            if speakerCleanupStatus == .cleaning, speakerEngine != nil { return }
+            // Defer the actual HAL start to the NEXT run-loop tick. `applySpeakerCleanup()` is
+            // reachable from AudioModel.init(), which runs inside applicationDidFinishLaunching's
+            // Apple-event dispatch — calling AudioDeviceStart synchronously there deadlocks the
+            // main thread against the HAL's own main-run-loop hand-shake (observed: init() parked
+            // in AudioDeviceStart_mac_imp → pthread_mutex_wait, app frozen before first event).
+            // The generation counter drops a stale deferred start if the toggle flips again
+            // (or the sibling exclusion turns us off) before the tick fires.
+            speakerApplyGeneration &+= 1
+            let gen = speakerApplyGeneration
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.speakerApplyGeneration == gen,
+                      self.speakerCleanupEnabled else { return }
+                let engine = SpeakerCleanupEngine()
+                // Runtime self-teardown (default output vanished, or resolved to our own "NoNoise
+                // Speaker" with no safe fallback): release the engine and drop to .failed. Weak
+                // captures + identity check ignore a late callback from a replaced/disabled engine.
+                engine.onRuntimeFailure = { [weak self, weak engine] in
+                    guard let self = self, let engine = engine, self.speakerEngine === engine else { return }
+                    self.speakerEngine = nil
+                    self.speakerCleanupStatus = .failed
+                }
+                if engine.start() {
+                    self.speakerEngine = engine
+                    self.speakerCleanupStatus = .cleaning
+                } else {
+                    engine.stop()
+                    self.speakerEngine = nil
+                    self.speakerCleanupStatus = .failed   // toggle stays on; retry on re-toggle
+                }
+            }
+        } else {
+            speakerApplyGeneration &+= 1   // invalidate any in-flight deferred start
+            speakerEngine?.stop()
+            speakerEngine = nil
+            speakerCleanupStatus = .off
+        }
+    }
+
+    private func persistSpeakerSettings() {
+        UserDefaults.standard.set(speakerCleanupEnabled, forKey: PrefKey.speakerEnabled)
     }
 
     /// Resolve a device UID to its AudioObjectID via the HAL. Works for INPUT-only devices too

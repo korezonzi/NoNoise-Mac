@@ -11,6 +11,7 @@ public enum SettingsResetPolicy {
     public static let inputVolumeKey = "mv.inputVolume"
     public static let smartLevelKey = "mv.smartLevel"
     public static let incomingEnabledKey = "mv.incomingEnabled"
+    public static let speakerEnabledKey = "mv.speakerEnabled"
     public static let profilesKey = "mv.profiles"
     public static let loudnessNormKey = "mv.loudnessNorm"
     public static let loudnessTargetKey = "mv.loudnessTarget"
@@ -26,6 +27,7 @@ public enum SettingsResetPolicy {
         inputVolumeKey,
         smartLevelKey,
         incomingEnabledKey,
+        speakerEnabledKey,
         loudnessNormKey,
         loudnessTargetKey
     ]
