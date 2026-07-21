@@ -47,6 +47,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.behavior = []   // NOT .removalAllowed — Cmd-drag removal would strand a menu-bar-only app
+        // Force-visible: NSStatusItem autosaves visibility under "NSStatusItem Visible* Item-0",
+        // and a stale `= 0` (recorded back in the MenuBarExtra days, or by a menu-bar manager)
+        // silently restores the item as HIDDEN on every launch — app runs, no icon anywhere.
+        // A menu-bar-only app must never start invisible, so pin it true after creation.
+        statusItem.isVisible = true
         if let button = statusItem.button {
             button.image = NoNoiseLogoImage.menuBar(isActive: model.isAIEnabled)
             button.target = self
