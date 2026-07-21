@@ -668,10 +668,15 @@ static OSStatus NoNoiseMic_StartIO(AudioServerPlugInDriverRef inDriver, AudioObj
         nn_clock_init(&gClockSpeakerTap, gAnchorHostTime, tps, kSampleRate, kZeroTimeStampPeriod);
     }
     gIOCount++;
-    if (isMicDevice(inDeviceObjectID))            gMicRunning = true;
-    else if (isEngineDevice(inDeviceObjectID))    gEngineRunning = true;
-    else if (isSpeakerDevice(inDeviceObjectID))   gSpeakerRunning = true;
-    else                                          gSpeakerTapRunning = true;
+    // One-shot catch-up onto the shared sample axis for the device whose IO is starting.
+    // After this, GetZeroTimeStamp advances its clock at most one period per call — the HAL
+    // requires a continuous timeline; multi-period jumps there caused IO-overload storms
+    // that wedged coreaudiod's IO bring-up queue system-wide (see nn_clock.h).
+    uint64_t now = mach_absolute_time();
+    if (isMicDevice(inDeviceObjectID))            { nn_clock_resync(&gClockMic, now);        gMicRunning = true; }
+    else if (isEngineDevice(inDeviceObjectID))    { nn_clock_resync(&gClockEngine, now);     gEngineRunning = true; }
+    else if (isSpeakerDevice(inDeviceObjectID))   { nn_clock_resync(&gClockSpeaker, now);    gSpeakerRunning = true; }
+    else                                          { nn_clock_resync(&gClockSpeakerTap, now); gSpeakerTapRunning = true; }
     pthread_mutex_unlock(&gStateMutex);
     return noErr;
 }
@@ -695,14 +700,17 @@ static OSStatus NoNoiseMic_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver,
     (void)inDriver; (void)inClientID;
     if (!isDevice(inDeviceObjectID) || outSampleTime == NULL || outHostTime == NULL || outSeed == NULL) return kAudioHardwareIllegalOperationError;
 
+    // REALTIME PATH — called every cycle by each IO context's RT thread. NO gStateMutex here:
+    // taking it contended against StartIO/StopIO (ring clears, 4-clock init) and against every
+    // other IO context's RT thread; the resulting deadline misses produced HALC "out of order /
+    // overload" churn and, under multi-client load, wedged coreaudiod's IO bring-up system-wide.
+    // nn_clock is lock-free (atomic anchor + monotonic CAS on sampleTime) — see nn_clock.h.
     uint64_t st = 0, ht = 0;
-    pthread_mutex_lock(&gStateMutex);
     nn_clock *c = isMicDevice(inDeviceObjectID)     ? &gClockMic :
                   isEngineDevice(inDeviceObjectID)  ? &gClockEngine :
                   isSpeakerDevice(inDeviceObjectID) ? &gClockSpeaker :
                                                        &gClockSpeakerTap;
     nn_clock_get_zero_timestamp(c, mach_absolute_time(), &st, &ht);
-    pthread_mutex_unlock(&gStateMutex);
 
     *outSampleTime = (Float64)st;
     *outHostTime   = ht;
