@@ -4,11 +4,18 @@ import Combine
 import Core
 
 // NOTE (this fork): the original upstream app used SwiftUI's `MenuBarExtra`. On macOS 26 the
-// status-item scene is managed by FrontBoard/ControlCenter, and on this machine the system
-// delivered a terminate action to that scene at every launch (NSSceneStatusItem
-// scene:handleActions: → NSApplication.terminate), killing the app ~3 s after start even with
-// a clean "NSStatusItem VisibleCC" preference. The status item is therefore managed manually
-// via NSStatusItem in the AppDelegate, which does not go through the scene system at all.
+// menu bar is managed per-bundle-id by FrontBoard/ControlCenter, and this machine's management
+// DB held a poisoned "hidden" registration for the upstream id `com.ivalsaraj.NoNoiseMac`.
+// That single root cause produced two different symptoms:
+//   1. MenuBarExtra: FrontBoard delivered a terminate action to the status-item scene at every
+//      launch (NSSceneStatusItem scene:handleActions: → NSApplication.terminate) — app died ~3 s in.
+//   2. Raw NSStatusItem: the item's window was created but never adopted by the layout — parked
+//      off-screen, permanently occluded, on BOTH displays, immune to isVisible pins, pref-key
+//      resets and ControlCenter restarts.
+// Proof: the identical binary under a fresh bundle id lays out and draws normally (probe test).
+// Fix: this fork's CFBundleIdentifier is `com.korezonzi.NoNoiseMac` (see also the one-shot
+// defaults migration below). The status item stays manually managed via NSStatusItem in the
+// AppDelegate — it works fine under the new id and gives us the right-click menu for free.
 // The empty Settings scene below exists only because a SwiftUI `App` must declare a scene.
 @main
 struct NoNoiseMacApp: App {
@@ -35,8 +42,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var iconCancellable: AnyCancellable?
 
+    /// One-shot migration of user settings from the upstream bundle id's defaults domain.
+    /// This fork changed CFBundleIdentifier (com.ivalsaraj.NoNoiseMac → com.korezonzi.NoNoiseMac)
+    /// because macOS 26's menu-bar item management held a poisoned "hidden" registration for the
+    /// old id — the status item's window was created but stayed permanently occluded/parked
+    /// off-screen, on every launch, regardless of isVisible/pref-key/ControlCenter resets. The
+    /// same binary under a fresh id lays out and draws normally (verified with a probe bundle).
+    /// A new id means a new defaults domain, so copy the user's mv.* settings across once.
+    private static func migrateDefaultsFromUpstreamID() {
+        let d = UserDefaults.standard
+        let markerKey = "mv.migratedFromIvalsarajID"
+        guard !d.bool(forKey: markerKey) else { return }
+        if let old = d.persistentDomain(forName: "com.ivalsaraj.NoNoiseMac") {
+            for (key, value) in old where key.hasPrefix("mv.") && d.object(forKey: key) == nil {
+                d.set(value, forKey: key)
+            }
+        }
+        d.set(true, forKey: markerKey)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        Self.migrateDefaultsFromUpstreamID()   // BEFORE AudioModel() — its init reads UserDefaults
 
         let model = AudioModel()
         audioModel = model

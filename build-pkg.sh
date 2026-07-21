@@ -12,7 +12,7 @@ cd "$(dirname "$0")"
 
 APP_BUNDLE="NoNoiseMac.app"
 DRIVER_BUNDLE="NoNoiseMic.driver"
-PKG_IDENTIFIER="com.ivalsaraj.NoNoiseMac.pkg"
+PKG_IDENTIFIER="com.korezonzi.NoNoiseMac.pkg"
 HAL_DIR="/Library/Audio/Plug-Ins/HAL"
 
 usage() {
