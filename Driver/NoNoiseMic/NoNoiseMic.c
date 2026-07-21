@@ -668,15 +668,17 @@ static OSStatus NoNoiseMic_StartIO(AudioServerPlugInDriverRef inDriver, AudioObj
         nn_clock_init(&gClockSpeakerTap, gAnchorHostTime, tps, kSampleRate, kZeroTimeStampPeriod);
     }
     gIOCount++;
-    // One-shot catch-up onto the shared sample axis for the device whose IO is starting.
-    // After this, GetZeroTimeStamp advances its clock at most one period per call — the HAL
-    // requires a continuous timeline; multi-period jumps there caused IO-overload storms
-    // that wedged coreaudiod's IO bring-up queue system-wide (see nn_clock.h).
+    // One-shot catch-up onto the shared sample axis, ONLY on this device's not-running→running
+    // transition. After this, GetZeroTimeStamp advances its clock at most one period per call —
+    // the HAL requires a continuous timeline; multi-period jumps there caused IO-overload storms
+    // that wedged coreaudiod's IO bring-up queue system-wide (see nn_clock.h). The running-flag
+    // guard matters: StartIO nests per client, and resyncing a clock that is already LIVE would
+    // forward-jump a published timeline — the exact discontinuity this design removes.
     uint64_t now = mach_absolute_time();
-    if (isMicDevice(inDeviceObjectID))            { nn_clock_resync(&gClockMic, now);        gMicRunning = true; }
-    else if (isEngineDevice(inDeviceObjectID))    { nn_clock_resync(&gClockEngine, now);     gEngineRunning = true; }
-    else if (isSpeakerDevice(inDeviceObjectID))   { nn_clock_resync(&gClockSpeaker, now);    gSpeakerRunning = true; }
-    else                                          { nn_clock_resync(&gClockSpeakerTap, now); gSpeakerTapRunning = true; }
+    if (isMicDevice(inDeviceObjectID))            { if (!gMicRunning)        nn_clock_resync(&gClockMic, now);        gMicRunning = true; }
+    else if (isEngineDevice(inDeviceObjectID))    { if (!gEngineRunning)     nn_clock_resync(&gClockEngine, now);     gEngineRunning = true; }
+    else if (isSpeakerDevice(inDeviceObjectID))   { if (!gSpeakerRunning)    nn_clock_resync(&gClockSpeaker, now);    gSpeakerRunning = true; }
+    else                                          { if (!gSpeakerTapRunning) nn_clock_resync(&gClockSpeakerTap, now); gSpeakerTapRunning = true; }
     pthread_mutex_unlock(&gStateMutex);
     return noErr;
 }
