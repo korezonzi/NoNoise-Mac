@@ -10,7 +10,7 @@ final class VoiceProfileTests: XCTestCase {
         let profile = VoiceProfile(
             id: UUID(),
             name: "Solo Narration",
-            preset: .podcast,
+            preset: .medium,
             suppressionStrength: 0.85,
             attenuationLimitDb: 24.0,
             outputGainValue: 1.2,
@@ -43,7 +43,8 @@ final class VoiceProfileTests: XCTestCase {
     // MARK: - Extensibility: unknown fields are tolerated (schema forward-compatibility)
 
     /// A JSON payload with unknown fields (e.g. from a future plan's additions) must decode
-    /// without error — the decoder silently ignores unknown keys.
+    /// without error — the decoder silently ignores unknown keys. Also exercises the legacy
+    /// preset-name migration: "podcast" (pre-redesign) must decode as `.medium`.
     func testUnknownFieldsAreIgnored() throws {
         let json = """
         {
@@ -67,7 +68,7 @@ final class VoiceProfileTests: XCTestCase {
         """.data(using: .utf8)!
         let decoded = try VoiceProfile.decoder.decode(VoiceProfile.self, from: json)
         XCTAssertEqual(decoded.name, "Test")
-        XCTAssertEqual(decoded.preset, .podcast)
+        XCTAssertEqual(decoded.preset, .medium, "legacy \"podcast\" must migrate to .medium")
         XCTAssertEqual(decoded.mouthNoiseLevel, .medium)
         XCTAssertEqual(decoded.inputVolumeValue ?? 0, 0.75, accuracy: 1e-6)
         XCTAssertEqual(decoded.smartLevelEnabled, true)
@@ -78,7 +79,8 @@ final class VoiceProfileTests: XCTestCase {
     // MARK: - Extensibility: missing optional future fields default gracefully
 
     /// A JSON payload WITHOUT optional fields (i.e. produced by an older version)
-    /// must decode cleanly — missing optional fields default to nil.
+    /// must decode cleanly — missing optional fields default to nil. Also exercises the legacy
+    /// preset-name migration: "meeting" (pre-redesign) must decode as `.strong`.
     func testMissingOptionalFieldsDefaultToNil() throws {
         // This represents a minimal v1 payload with no future extension fields.
         let json = """
@@ -96,7 +98,7 @@ final class VoiceProfileTests: XCTestCase {
         """.data(using: .utf8)!
         let decoded = try VoiceProfile.decoder.decode(VoiceProfile.self, from: json)
         XCTAssertEqual(decoded.name, "Minimal")
-        XCTAssertEqual(decoded.preset, .meeting)
+        XCTAssertEqual(decoded.preset, .strong, "legacy \"meeting\" must migrate to .strong")
         // Confirm decoding succeeds cleanly with no future fields present.
         XCTAssertNil(decoded.mouthNoiseLevel)
         XCTAssertNil(decoded.inputVolumeValue)
@@ -117,13 +119,13 @@ final class VoiceProfileTests: XCTestCase {
 
     // MARK: - Default factory
 
-    /// makeDefault produces a valid profile from the Meeting preset defaults.
+    /// makeDefault produces a valid profile from the Auto preset defaults (the app's own default).
     func testMakeDefaultIsValid() {
         let p = VoiceProfile.makeDefault(name: "New Profile")
         XCTAssertEqual(p.name, "New Profile")
-        XCTAssertEqual(p.preset, .meeting)
-        XCTAssertEqual(p.suppressionStrength, 1.0, accuracy: 1e-6)
-        XCTAssertEqual(p.attenuationLimitDb, VoicePreset.maxAttenuationDb, accuracy: 1e-6)
+        XCTAssertEqual(p.preset, .auto)
+        XCTAssertEqual(p.suppressionStrength, VoicePreset.auto.parameters!.suppressionStrength, accuracy: 1e-6)
+        XCTAssertEqual(p.attenuationLimitDb, VoicePreset.auto.parameters!.attenuationLimitDb, accuracy: 1e-6)
         XCTAssertEqual(p.outputGainValue, 1.0, accuracy: 1e-6)
         XCTAssertFalse(p.voicePolishEnabled == false && p.clarityLevel == .off, "defaults should be sane")
     }
@@ -212,7 +214,7 @@ final class VoiceProfileTests: XCTestCase {
         var store = VoiceProfileStore()
         store.save(VoiceProfile(
             name: "Interview",
-            preset: .podcast,
+            preset: .medium,
             suppressionStrength: 0.9,
             attenuationLimitDb: 24.0,
             outputGainValue: 1.1,
@@ -223,7 +225,7 @@ final class VoiceProfileTests: XCTestCase {
         let restored = try VoiceProfileStore.decode(from: data)
         XCTAssertEqual(restored.profiles.count, 1)
         XCTAssertEqual(restored.profiles.first?.name, "Interview")
-        XCTAssertEqual(restored.profiles.first?.preset, .podcast)
+        XCTAssertEqual(restored.profiles.first?.preset, .medium)
         XCTAssertEqual(restored.profiles.first?.clarityLevel, .low)
     }
 
@@ -239,7 +241,8 @@ final class VoiceProfileTests: XCTestCase {
         XCTAssertTrue(store.profiles.isEmpty, "corrupt JSON must not crash — return empty store")
     }
 
-    /// Profiles with unknown/future fields survive a store decode round-trip.
+    /// Profiles with unknown/future fields survive a store decode round-trip. Also exercises the
+    /// legacy preset-name migration: "tutorial" (pre-redesign) must decode as `.weak`.
     func testDecodeToleratesProfilesWithUnknownFields() throws {
         let json = """
         [
@@ -260,7 +263,7 @@ final class VoiceProfileTests: XCTestCase {
         let store = try VoiceProfileStore.decode(from: json)
         XCTAssertEqual(store.profiles.count, 1)
         XCTAssertEqual(store.profiles.first?.name, "Future")
-        XCTAssertEqual(store.profiles.first?.preset, .tutorial)
+        XCTAssertEqual(store.profiles.first?.preset, .weak, "legacy \"tutorial\" must migrate to .weak")
     }
 
     // MARK: - applyProfile shape contract (pure logic, no AudioModel)
@@ -269,7 +272,7 @@ final class VoiceProfileTests: XCTestCase {
     /// through the store and can be reconstructed exactly — this is the invariant
     /// that applyProfile must restore. Tested here without AudioModel.
     func testSavedProfileMatchesInputSettings() throws {
-        let preset = VoicePreset.podcast
+        let preset = VoicePreset.medium
         let profile = VoiceProfile(
             name: "Consistency Check",
             preset: preset,

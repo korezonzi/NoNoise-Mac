@@ -49,7 +49,7 @@ struct ContentView: View {
                 Text("NoNoise Mac")
                     .font(.system(.headline, design: .rounded))
                     .fontWeight(.bold)
-                Text("Noise Cancellation")
+                Text("ノイズ除去")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -62,7 +62,7 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
-            .help("Settings")
+            .help("設定")
         }
     }
 
@@ -87,10 +87,10 @@ struct ContentView: View {
                         .foregroundColor(on ? .accentColor : .secondary)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Noise Cancellation")
+                    Text("ノイズ除去")
                         .font(.subheadline)
                         .fontWeight(.semibold)
-                    Text(on ? "Active · DeepFilterNet AI" : "Off · Passthrough")
+                    Text(on ? "動作中 · DeepFilterNet AI" : "オフ · 素通し")
                         .font(.caption)
                         .foregroundColor(on ? .green : .secondary)
                 }
@@ -104,8 +104,8 @@ struct ContentView: View {
                     .tint(.green)
                     .disabled(dispatcher.isBypassed)
                     .help(dispatcher.isBypassed
-                          ? "Disabled while A/B bypass is active — release bypass to change AI."
-                          : "Toggle Noise Cancellation")
+                          ? "A/B聴き比べ（元音声）が有効な間は操作できません。AIを切り替えるには聴き比べを解除してください。"
+                          : "ノイズ除去を切り替え")
             }
 
             // Live meters + warnings observe `meterModel` (NOT audioModel), so their 25 Hz
@@ -124,8 +124,8 @@ struct ContentView: View {
                 Image(systemName: "waveform.slash")
                     .foregroundColor(.orange)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("A/B Bypass Active").font(.caption).fontWeight(.medium).foregroundColor(.orange)
-                    Text("Hearing raw mic — AI off while bypass is on.")
+                    Text("A/B聴き比べ中（元音声）").font(.caption).fontWeight(.medium).foregroundColor(.orange)
+                    Text("マイクの生音を再生中 — 聴き比べ中はAIオフになります。")
                         .font(.caption2).foregroundColor(.secondary)
                 }
                 Spacer()
@@ -139,7 +139,7 @@ struct ContentView: View {
 
     private var modeCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            cardLabel("Mode", systemImage: "wand.and.stars")
+            cardLabel("モード", systemImage: "wand.and.stars")
             Picker("", selection: $audioModel.selectedPreset) {
                 ForEach(VoicePreset.allCases) { preset in
                     Text(preset.label).tag(preset)
@@ -147,6 +147,10 @@ struct ContentView: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
+            if let stage = audioModel.autoCurrentStage {
+                Text("自動（いま：\(stage.label)）")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
         }
         .nnCard()
     }
@@ -155,7 +159,7 @@ struct ContentView: View {
 
     private var clarityCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            cardLabel("Broadcast Voice", systemImage: "waveform.path.ecg")
+            cardLabel("声のクリア化", systemImage: "waveform.path.ecg")
             Picker("", selection: $audioModel.clarityLevel) {
                 ForEach(ClarityLevel.allCases) { level in
                     Text(level.label).tag(level)
@@ -181,8 +185,8 @@ struct ContentView: View {
 
         var label: String {
             switch self {
-            case .speaker:   return "Calls only (recommended)"
-            case .allSystem: return "All system audio"
+            case .speaker:   return "通話アプリのみ（推奨）"
+            case .allSystem: return "全システム音声"
             }
         }
 
@@ -190,9 +194,9 @@ struct ContentView: View {
         var caption: String {
             switch self {
             case .speaker:
-                return "Set your call app's output to “NoNoise Speaker” to clean only the other person's voice. In Meet: browser Settings ▸ Audio ▸ Speakers."
+                return "通話アプリの出力を「NoNoise Speaker」にすると、相手の声だけノイズ除去されます。Meetはブラウザ内の設定 ▸ 音声 ▸ スピーカーで選択"
             case .allSystem:
-                return "Cleans everything you hear on this Mac, including music."
+                return "このMacで聞こえる音すべて（音楽を含む）をノイズ除去します。"
             }
         }
     }
@@ -200,7 +204,7 @@ struct ContentView: View {
     private var incomingCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                cardLabel("Clean Incoming", systemImage: "person.wave.2.fill")
+                cardLabel("相手の音声もクリアに", systemImage: "person.wave.2.fill")
                 Spacer()
                 Toggle("", isOn: cleanIncomingEnabledBinding)
                     .labelsHidden().toggleStyle(.switch)
@@ -227,7 +231,7 @@ struct ContentView: View {
             // until the user also flips their call app's own output device — surface a nudge for
             // as long as we're genuinely running so it isn't missed after the toggle is flipped.
             if cleanIncomingMode == .speaker, audioModel.speakerCleanupStatus == .cleaning {
-                Text("Don’t forget: choose “NoNoise Speaker” as the speaker in your call app.")
+                Text("通話アプリのスピーカーに「NoNoise Speaker」を選ぶのを忘れずに")
                     .font(.caption2).foregroundColor(.orange)
             }
         }
@@ -259,17 +263,17 @@ struct ContentView: View {
         switch cleanIncomingMode {
         case .speaker:
             switch audioModel.speakerCleanupStatus {
-            case .unavailable: return "Requires the NoNoise driver"
+            case .unavailable: return "NoNoiseドライバが必要です"
             case .off:         return nil
-            case .cleaning:    return "Cleaning the call app’s audio"
-            case .failed:      return "Couldn’t start — toggle off and on to retry"
+            case .cleaning:    return "通話アプリの音声をクリア中"
+            case .failed:      return "開始できませんでした — オフ/オンで再試行してください"
             }
         case .allSystem:
             switch audioModel.incomingCleanupStatus {
-            case .unavailable: return "Requires macOS 14.4 or later"
+            case .unavailable: return "macOS 14.4以降が必要です"
             case .off:         return nil
-            case .cleaning:    return "Cleaning all incoming audio"
-            case .failed:      return "Couldn’t start — allow audio capture in System Settings ▸ Privacy & Security"
+            case .cleaning:    return "すべての受信音声をクリア中"
+            case .failed:      return "開始できませんでした — システム設定 ▸ プライバシーとセキュリティで音声キャプチャを許可してください"
             }
         }
     }
@@ -289,7 +293,7 @@ struct ContentView: View {
 
     private var mouthNoiseCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            cardLabel("Mouth Noise", systemImage: "mouth.fill")
+            cardLabel("リップノイズ除去", systemImage: "mouth.fill")
             Picker("", selection: $audioModel.mouthNoiseLevel) {
                 ForEach(MouthNoiseLevel.allCases) { level in
                     Text(level.label).tag(level)
@@ -306,7 +310,7 @@ struct ContentView: View {
     private var devicesCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
-                cardLabel("Input", systemImage: "mic.fill")
+                cardLabel("入力", systemImage: "mic.fill")
                     .frame(width: 74, alignment: .leading)
                 Picker("", selection: $audioModel.selectedInputDeviceID) {
                     ForEach(audioModel.inputDevices, id: \.uniqueID) { device in
@@ -317,7 +321,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity)
             }
             HStack(spacing: 10) {
-                cardLabel("Output", systemImage: "speaker.wave.2.fill")
+                cardLabel("出力", systemImage: "speaker.wave.2.fill")
                     .frame(width: 74, alignment: .leading)
                 if audioModel.driverInstalled {
                     // Output is auto-routed to the hidden "NoNoise Mic Engine", which is intentionally
@@ -325,7 +329,7 @@ struct ContentView: View {
                     // instead. The picker remains for the BlackHole fallback (driver not installed).
                     HStack(spacing: 6) {
                         Image(systemName: "wand.and.stars").font(.caption2).foregroundColor(.secondary)
-                        Text("Automatic → NoNoise Mic").font(.caption).foregroundColor(.secondary)
+                        Text("自動 → NoNoise Mic").font(.caption).foregroundColor(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
@@ -350,15 +354,15 @@ struct ContentView: View {
             if audioModel.driverInstalled {
                 Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("NoNoise Mic ready").font(.caption).fontWeight(.medium)
-                    Text("Pick “NoNoise Mic” as the mic in Slack/Zoom/Meet/OBS.")
+                    Text("NoNoise Mic 準備完了").font(.caption).fontWeight(.medium)
+                    Text("Slack/Zoom/Meet/OBSでマイクに「NoNoise Mic」を選択してください。")
                         .font(.caption2).foregroundColor(.secondary)
                 }
             } else {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("NoNoise Mic not installed").font(.caption).fontWeight(.medium)
-                    Text("Run ./install-driver.sh to add the virtual mic.")
+                    Text("NoNoise Mic が未インストールです").font(.caption).fontWeight(.medium)
+                    Text("仮想マイクを追加するには ./install-driver.sh を実行してください。")
                         .font(.caption2).foregroundColor(.secondary)
                 }
             }
@@ -374,12 +378,12 @@ struct ContentView: View {
             Button {
                 WindowManager.openSettings(model: audioModel, hotkeyManager: hotkeyManager, updaterController: updaterController, launchAtLoginManager: launchAtLoginManager)
             } label: {
-                Label("Settings", systemImage: "slider.horizontal.3")
+                Label("設定", systemImage: "slider.horizontal.3")
             }
             .controlSize(.small)
 
             Link(destination: SupportLinks.reportIssueOrFeature) {
-                Label("Report", systemImage: "exclamationmark.bubble")
+                Label("問題を報告", systemImage: "exclamationmark.bubble")
             }
             .controlSize(.small)
 
@@ -394,7 +398,7 @@ struct ContentView: View {
             Button(role: .destructive) {
                 NSApplication.shared.terminate(nil)
             } label: {
-                Label("Quit", systemImage: "power")
+                Label("終了", systemImage: "power")
             }
             .controlSize(.small)
             .keyboardShortcut("q")
@@ -435,25 +439,25 @@ private struct StatusMeters: View {
                 MeterView(level: meter.outputLevel)
                     .frame(height: 6)
                 if meter.isOutputClipping {
-                    Text("CLIP").font(.caption2).fontWeight(.bold).foregroundColor(.red)
+                    Text("クリップ").font(.caption2).fontWeight(.bold).foregroundColor(.red)
                 }
             }
 
             if meter.isInputNearCeiling || meter.isSourceMicClipping || meter.isOutputClipping {
                 VStack(alignment: .leading, spacing: 4) {
                     if meter.isSourceMicClipping {
-                        Label("Source mic clipping — lower device input volume if available.",
+                        Label("マイクの入力がクリップしています — 可能ならデバイスの入力音量を下げてください。",
                               systemImage: "exclamationmark.triangle.fill")
                             .font(.caption2)
                             .foregroundColor(.orange)
                     }
                     if meter.isInputNearCeiling {
-                        Label("Input too loud", systemImage: "exclamationmark.triangle.fill")
+                        Label("入力音量が大きすぎます", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption2)
                             .foregroundColor(.orange)
                     }
                     if meter.isOutputClipping {
-                        Label("Output clipping", systemImage: "exclamationmark.triangle.fill")
+                        Label("出力がクリップしています", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption2)
                             .foregroundColor(.orange)
                     }
@@ -472,7 +476,7 @@ private struct LiveHUDCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Live", systemImage: "waveform.path.ecg")
+            Label("ライブ", systemImage: "waveform.path.ecg")
                 .font(.caption)
                 .fontWeight(.medium)
                 .foregroundColor(.secondary)
@@ -487,7 +491,7 @@ private struct LiveHUDCard: View {
                      ? "— LUFS" : String(format: "%.1f LUFS", meter.momentaryLUFS))
                     .font(.caption).monospacedDigit().foregroundColor(.secondary)
                 Spacer()
-                Text(String(format: "%.0f ms latency", addedLatencyMs))
+                Text(String(format: "%.0f ms 遅延", addedLatencyMs))
                     .font(.caption).monospacedDigit().foregroundColor(.secondary)
             }
         }
@@ -549,7 +553,7 @@ class WindowManager {
                                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                 backing: .buffered, defer: false)
             panel.center()
-            panel.title = "NoNoise Mac Settings"
+            panel.title = "NoNoise Mac 設定"
             panel.titleVisibility = .hidden
             panel.titlebarAppearsTransparent = true
             panel.contentView = NSHostingView(rootView: view)

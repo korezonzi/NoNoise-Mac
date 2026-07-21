@@ -140,7 +140,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     }
 
     // Preset + suppression intensity (persisted to UserDefaults under mv.*).
-    @Published public var selectedPreset: VoicePreset = .meeting {
+    @Published public var selectedPreset: VoicePreset = .auto {
         didSet {
             guard !isApplyingPreset else { return }
             applyPreset(selectedPreset)   // no-op for .custom (keeps current knobs)
@@ -148,6 +148,14 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             persistSettings()             // persist the selection itself, incl. a direct .custom pick
         }
     }
+
+    /// The stage `AutoStrengthController` currently has `.auto` running at, for the UI caption
+    /// ("自動（いま：中）"). Non-nil ONLY while `selectedPreset == .auto` — `nil` for every other
+    /// preset (including `.custom`, which a manual knob edit while in Auto flips to). Written from
+    /// `applyPreset`/`applyProfile`/`onKnobChanged` (rare, main-thread preset transitions) and from
+    /// `applyAutoStage` (only on an actual stage change) — NEVER from the 25 Hz control pump itself,
+    /// which must touch no `@Published` field on every tick (see "Metering & loudness" in AGENTS.md).
+    @Published public private(set) var autoCurrentStage: VoicePreset?
 
     @Published public var suppressionStrength: Float = 1.0 {
         didSet {
@@ -284,6 +292,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     private var consecutiveTrimmedHotTicks = 0
     private var consecutiveOutputClipTicks = 0
     private var lastSmartLevelAdjustTime: Date?
+
+    /// `.auto`'s dynamic EMA + current stage, mirrored across control-pump ticks — the caller-owned
+    /// state half of `AutoStrengthController`'s pure `evaluate(state:...)` (same externally-held-state
+    /// idiom as `consecutiveTrimmedHotTicks` above). Reset to a fresh `.medium`-start whenever the
+    /// active preset transitions TO `.auto` (see `syncAutoState`); irrelevant otherwise.
+    private var autoStrengthState = AutoStrengthController.State()
 
     // Live HUD / loudness telemetry. The meter is a value-type struct mutated ONLY on
     // the render thread (recordOutputTelemetry); it is NEVER read from main — the render
@@ -443,24 +457,33 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     /// `isApplyingPreset` suppresses the knob `didSet`s from flipping the preset
     /// back to `.custom` while we apply it.
     private func applyPreset(_ preset: VoicePreset) {
+        // Runs BEFORE the parameters guard so a direct `.custom` pick (which has no parameters)
+        // still clears `autoCurrentStage` when leaving `.auto`.
+        syncAutoState(for: preset)
         guard let p = preset.parameters else { return }  // .custom keeps current knobs
         let previously = isApplyingPreset
         isApplyingPreset = true
         suppressionStrength = p.suppressionStrength
         attenuationLimitDb = p.attenuationLimitDb
         outputGainValue = p.outputGain
-        if let vol = preset.defaultInputVolume {
-            inputVolumeValue = SmartLevelController.clampInputVolume(vol)
-        }
-        if let clarity = preset.defaultClarityLevel {
-            clarityLevel = clarity
-        }
-        if let polish = preset.defaultVoicePolish {
-            voicePolishEnabled = polish
-        }
         isApplyingPreset = previously
         // Persistence is the caller's responsibility (selectedPreset.didSet), so a
         // direct .custom selection — which no-ops here — is still persisted.
+    }
+
+    /// Reset (or clear) `.auto`'s dynamic state for a preset transition. Called from every path
+    /// that can move `selectedPreset` TO or AWAY FROM `.auto` — `applyPreset`, `applyProfile`,
+    /// `onKnobChanged`'s manual-edit-to-`.custom` flip, `resetSettingsToDefaults`, and
+    /// `loadSettings` — since several of those set `selectedPreset` directly under the
+    /// `isApplyingPreset` guard and so never route through `applyPreset`'s `didSet`.
+    /// Idempotent: safe to call with the same preset repeatedly.
+    private func syncAutoState(for preset: VoicePreset) {
+        if preset == .auto {
+            autoStrengthState = AutoStrengthController.State()
+            autoCurrentStage = autoStrengthState.currentStage.preset
+        } else {
+            autoCurrentStage = nil
+        }
     }
 
     /// Configure the voice chain from the active preset, gated by the master
@@ -480,10 +503,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     private func onKnobChanged() {
         guard !isApplyingPreset else { return }
         if selectedPreset != .custom {
+            let wasAuto = selectedPreset == .auto
             isApplyingPreset = true
             selectedPreset = .custom
             isApplyingPreset = false
-            applyVoiceChain()   // Custom has its own balanced chain; configure once on transition
+            applyVoiceChain()   // reconfigure once on transition (all presets share one chain now)
+            if wasAuto { syncAutoState(for: .custom) }  // leaving .auto: clear the stage caption
         }
         persistSettings()
     }
@@ -554,6 +579,10 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         // suppressing the re-entry into applyPreset and applyVoiceChain.
         selectedPreset = profile.preset
         isApplyingPreset = false
+        // selectedPreset.didSet is suppressed above (isApplyingPreset), so applyPreset — and thus
+        // its syncAutoState call — never runs for a profile apply. Call it explicitly so
+        // `autoCurrentStage` reflects the restored preset (non-nil only if it's `.auto`).
+        syncAutoState(for: profile.preset)
         // Single reconfigure with the final restored state — matches loadSettings() pattern.
         applyVoiceChain()
         persistSettings()
@@ -599,12 +628,13 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     public func resetSettingsToDefaults() {
         SettingsResetPolicy.reset()
 
+        let autoDefaults = VoicePreset.auto.parameters!  // `.auto` always has parameters
         isApplyingPreset = true
         isAIEnabled = true
-        selectedPreset = .meeting
-        suppressionStrength = 1.0
-        attenuationLimitDb = VoicePreset.maxAttenuationDb
-        outputGainValue = 1.0
+        selectedPreset = .auto
+        suppressionStrength = autoDefaults.suppressionStrength
+        attenuationLimitDb = autoDefaults.attenuationLimitDb
+        outputGainValue = autoDefaults.outputGain
         voicePolishEnabled = true
         clarityLevel = .off
         mouthNoiseLevel = .off
@@ -615,6 +645,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         loudnessNormEnabled = false
         loudnessTargetLUFS = -14
         isApplyingPreset = false
+        syncAutoState(for: .auto)   // direct assignment above bypasses applyPreset's own call
 
         meterSnapshot.smartLevelMessage = nil
         currentLoudnessGain = 1
@@ -641,10 +672,10 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             profiles = VoiceProfileStore.decodeSafe(from: data).profiles
         }
         guard let raw = d.string(forKey: PrefKey.preset),
-              let preset = VoicePreset(rawValue: raw) else {
-            // First launch: keep defaults (Meeting) and push them to the DSP.
+              let preset = VoicePreset.migratingRawValue(raw) else {
+            // First launch: keep defaults (Auto) and push them to the DSP.
             inputVolumeValue = SmartLevelController.defaultInputVolume
-            applyPreset(.meeting)
+            applyPreset(.auto)
             applyVoiceChain()
             applyIncomingCleanup()   // feature off on first launch; sets status (.off or .unavailable)
             applySpeakerCleanup()    // feature off on first launch; sets status (.off or .unavailable)
@@ -691,6 +722,10 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             outputGainValue = p.outputGain
             isApplyingPreset = false
         }
+        // selectedPreset.didSet is suppressed above (isApplyingPreset), so applyPreset — and thus
+        // its syncAutoState call — never runs for a settings load. Call it explicitly so
+        // `autoCurrentStage` reflects the restored preset (non-nil only if it's `.auto`).
+        syncAutoState(for: preset)
         // Single explicit configure from the final restored state.
         applyVoiceChain()
         // Create the incoming engine once, only if the feature was persisted enabled (off → no-op).
@@ -1188,6 +1223,20 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         persistSettings()
     }
 
+    /// Programmatic strength/attenuation change driven by `.auto`'s environment evaluation. Uses the
+    /// SAME `isApplyingPreset` guard as `setOutputGainForSmartLevel` so it never flips the active
+    /// preset to `.custom` — but, UNLIKE Smart Level's gain reduction, is NEVER persisted: `.auto`'s
+    /// live stage is re-derived from scratch every time the preset is (re)selected (`syncAutoState`
+    /// resets `autoStrengthState` to a fresh `.medium` start), so only the `.auto` selection itself
+    /// needs to survive a relaunch, not the moment-to-moment stage.
+    private func applyAutoStage(_ stage: AutoStrengthController.Stage) {
+        isApplyingPreset = true
+        suppressionStrength = stage.suppressionStrength
+        attenuationLimitDb = stage.attenuationLimitDb
+        isApplyingPreset = false
+        autoCurrentStage = stage.preset
+    }
+
     // MARK: Control pump (always-on) vs UI publish (gated) — see "Metering & loudness" in AGENTS.md.
 
     /// Start the ALWAYS-ON audio-control pump. Created once at init and lives for the app's
@@ -1268,6 +1317,25 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         tTrimmedInputHotCount = 0
 
         updateSmartLevel()
+        updateAutoStrength()
+    }
+
+    /// Drive `.auto`'s dynamic strength/attenuation from this tick's smoothed AI activity —
+    /// no-op unless `.auto` is the active preset. Reads the SAME `meterSnapshot.aiActivity` /
+    /// `.inputLevel` this tick already computed above (no extra telemetry pass). Only writes the
+    /// knobs (`applyAutoStage`) on an actual stage change — `AutoStrengthController`'s hysteresis
+    /// keeps that to at most one write every few seconds, never per-tick.
+    private func updateAutoStrength() {
+        guard selectedPreset == .auto else { return }
+        let (newState, decision) = AutoStrengthController.evaluate(
+            state: autoStrengthState,
+            aiActivity: meterSnapshot.aiActivity,
+            inputLevel: meterSnapshot.inputLevel,
+            isAIEnabled: isAIEnabled)
+        autoStrengthState = newState
+        if decision.didChange {
+            applyAutoStage(newState.currentStage)
+        }
     }
 
     /// Begin observing the live meters for `source` (e.g. the popover's `onAppear`). The popover

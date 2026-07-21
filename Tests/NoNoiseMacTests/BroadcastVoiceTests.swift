@@ -219,7 +219,7 @@ final class BroadcastVoiceTests: XCTestCase {
     /// Clarity = Off must leave an enabled (polish-on) preset bit-identical to the canonical
     /// hp→lowShelf→highShelf→compressor→limiter chain — proving Broadcast Voice Off is a true no-op.
     func testClarityOffMatchesCanonicalPolishChain() {
-        let s = VoicePreset.podcast.voiceChain        // clarity defaults to .off
+        let s = VoicePreset.medium.voiceChain        // clarity defaults to .off
         let chain = VoiceChain()
         chain.configure(s)
         // Reference: the same primitives in the legacy order, with NO presence/de-esser stages.

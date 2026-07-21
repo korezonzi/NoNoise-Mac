@@ -25,12 +25,13 @@ final class AudioFileDenoiserTests: XCTestCase {
         await XCTAssertThrowsErrorAsync(try await denoiser.denoise(options))
     }
 
-    func testPodcastPresetEnablesVoiceChainForFileMode() {
-        XCTAssertTrue(AudioFileDenoiser.voiceChainSettings(for: .podcast).enabled)
-    }
-
-    func testMeetingPresetLeavesVoiceChainDisabledForFileMode() {
-        XCTAssertFalse(AudioFileDenoiser.voiceChainSettings(for: .meeting).enabled)
+    /// Every preset (the former Meeting-only `.disabled` gate is gone) enables the voice chain
+    /// for offline file-mode processing too.
+    func testAllPresetsEnableVoiceChainForFileMode() {
+        for preset in VoicePreset.allCases {
+            XCTAssertTrue(AudioFileDenoiser.voiceChainSettings(for: preset).enabled,
+                         "\(preset) must enable the voice chain")
+        }
     }
 
     func testTemporaryOutputURLPreservesAudioExtension() {

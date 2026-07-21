@@ -73,15 +73,16 @@ public struct VoiceProfile: Codable, Identifiable, Equatable, Sendable {
 
     // MARK: - Factory
 
-    /// Produce a profile snapshot from Meeting preset defaults. Use when the user saves
-    /// their first profile or when no prior settings are available.
+    /// Produce a profile snapshot from Auto preset defaults (the app's own default preset). Use
+    /// when the user saves their first profile or when no prior settings are available.
     public static func makeDefault(name: String) -> VoiceProfile {
-        VoiceProfile(
+        let p = VoicePreset.auto.parameters!  // `.auto` always has parameters
+        return VoiceProfile(
             name: name,
-            preset: .meeting,
-            suppressionStrength: 1.0,
-            attenuationLimitDb: VoicePreset.maxAttenuationDb,
-            outputGainValue: 1.0,
+            preset: .auto,
+            suppressionStrength: p.suppressionStrength,
+            attenuationLimitDb: p.attenuationLimitDb,
+            outputGainValue: p.outputGain,
             voicePolishEnabled: true,
             clarityLevel: .off
         )

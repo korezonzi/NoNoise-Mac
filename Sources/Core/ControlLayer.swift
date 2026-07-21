@@ -239,7 +239,7 @@ public struct ControlState: Equatable, Sendable {
     public init(desiredAI: Bool = true,
                 isBypassedMomentary: Bool = false,
                 isBypassedToggle: Bool = false,
-                preset: VoicePreset = .meeting,
+                preset: VoicePreset = .auto,
                 clarity: ClarityLevel = .off,
                 gain: Float = 1.0,
                 speakerCleanupEnabled: Bool = false,

@@ -11,7 +11,7 @@ public struct AudioDenoiseOptions: Equatable {
 
     public init(inputPath: String,
                 outputPath: String,
-                preset: VoicePreset = .meeting,
+                preset: VoicePreset = .strong,
                 gain: Float = 1.0,
                 strength: Float = 1.0,
                 attenuationDb: Float = VoicePreset.maxAttenuationDb,
@@ -62,7 +62,7 @@ public enum CLIArguments {
         var actionVerb: String?
         var denoiseInput: String?
         var denoiseOutput: String?
-        var preset: VoicePreset = .meeting
+        var preset: VoicePreset = .strong
         var strengthOverride: Float?
         var attenuationDbOverride: Float?
         var shouldOverwrite = false
@@ -89,7 +89,9 @@ public enum CLIArguments {
                 denoiseOutput = try value(after: arg, in: arguments, index: &index)
             case "--preset":
                 let rawPreset = try value(after: arg, in: arguments, index: &index)
-                guard let parsed = VoicePreset.allCases.first(where: { $0.rawValue == rawPreset.lowercased() }) else {
+                // Accepts both current names (auto/strong/medium/weak/custom) and the legacy
+                // pre-redesign names (meeting/podcast/tutorial) via the shared migration map.
+                guard let parsed = VoicePreset.migratingRawValue(rawPreset.lowercased()) else {
                     throw ParseError.invalidPreset(rawPreset)
                 }
                 preset = parsed

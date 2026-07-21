@@ -249,12 +249,12 @@ final class ControlLayerTests: XCTestCase {
     /// toggleAI emits ONLY .setAIEffective — never .setPreset/.setGain/.setClarity. This is the
     /// guard against the blanket write-back that flipped the active preset to .custom.
     func testToggleAIEmitsOnlyAIEffective() {
-        let s = ControlState(desiredAI: true, preset: .meeting, gain: 1.0)
+        let s = ControlState(desiredAI: true, preset: .strong, gain: 1.0)
         let (_, mutations) = ControlReducer.reduce(s, .toggleAI)
         XCTAssertEqual(mutations, [.setAIEffective(false)])
         // Critically: no .setPreset and no .setGain in the list.
         XCTAssertFalse(mutations.contains { if case .setPreset = $0 { return true }; return false },
-                       "toggleAI must NOT write preset (would demote Meeting → Custom)")
+                       "toggleAI must NOT write preset (would demote Strong → Custom)")
         XCTAssertFalse(mutations.contains { if case .setGain = $0 { return true }; return false },
                        "toggleAI must NOT write gain (gain write trips onKnobChanged → Custom)")
     }

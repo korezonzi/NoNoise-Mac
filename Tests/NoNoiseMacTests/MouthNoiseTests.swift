@@ -530,7 +530,7 @@ final class MouthNoiseTests: XCTestCase {
     /// mouthNoise == .off with an enabled (polish-on) preset must be bit-identical to the chain
     /// without the mouth-noise stages — proving Off is a true no-op.
     func testMouthNoiseOffMatchesLegacyChain() {
-        let s = VoicePreset.podcast.voiceChain
+        let s = VoicePreset.medium.voiceChain
         XCTAssertEqual(s.mouthNoiseLevel, .off,
                        "preset voiceChain must default mouthNoiseLevel to .off")
         let chain = VoiceChain()

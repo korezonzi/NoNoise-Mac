@@ -75,7 +75,7 @@ final class VoiceChainTests: XCTestCase {
 
     func testVoiceChainEnabledChangesSignal() {
         let chain = VoiceChain()
-        chain.configure(VoicePreset.podcast.voiceChain)
+        chain.configure(VoicePreset.medium.voiceChain)
         XCTAssertTrue(chain.isEnabled)
         var buf = [Float](repeating: 0.5, count: 4800)
         buf.withUnsafeMutableBufferPointer { chain.process($0.baseAddress!, count: $0.count) }
@@ -83,27 +83,22 @@ final class VoiceChainTests: XCTestCase {
         XCTAssertTrue(buf.allSatisfy { abs($0) <= powf(10, -1.0/20.0) + 1e-3 }, "output within ceiling")
     }
 
-    func testPresetMeetingHasPolishOff() {
-        XCTAssertFalse(VoicePreset.meeting.voiceChain.enabled)
-    }
-
-    func testPresetPodcastAndTutorialHavePolishOn() {
-        XCTAssertTrue(VoicePreset.podcast.voiceChain.enabled)
-        XCTAssertTrue(VoicePreset.tutorial.voiceChain.enabled)
-    }
-
-    func testPresetTutorialDoesNotAddCompressorMakeup() {
-        XCTAssertEqual(VoicePreset.tutorial.voiceChain.compMakeupDb, 0)
+    /// Every preset shares ONE voice-chain configuration now — the former Meeting-only
+    /// `.disabled` gate is gone; `AudioModel.voicePolishEnabled` is the sole on/off gate.
+    func testAllPresetsHaveVoiceChainEnabled() {
+        for preset in VoicePreset.allCases {
+            XCTAssertTrue(preset.voiceChain.enabled, "\(preset) must enable the voice chain")
+        }
     }
 
     func testVoiceChainResetsStateOnReEnable() {
         let chain = VoiceChain()
-        chain.configure(VoicePreset.podcast.voiceChain)
+        chain.configure(VoicePreset.medium.voiceChain)
         // Drive a loud burst so the high-pass z-state is energized.
         var loud = [Float](repeating: 0.9, count: 4800)
         loud.withUnsafeMutableBufferPointer { chain.process($0.baseAddress!, count: $0.count) }
         chain.configure(.disabled)                       // polish OFF (state frozen)
-        chain.configure(VoicePreset.podcast.voiceChain)  // back ON → reset() runs
+        chain.configure(VoicePreset.medium.voiceChain)   // back ON → reset() runs
         // Silence in must yield silence out: stale ringing would leak otherwise.
         var quiet = [Float](repeating: 0.0, count: 64)
         quiet.withUnsafeMutableBufferPointer { chain.process($0.baseAddress!, count: $0.count) }
@@ -148,11 +143,11 @@ final class VoiceChainTests: XCTestCase {
     /// Even with a large loudnessGain, the limiter still caps output at the ceiling.
     func testLoudnessGainStillRespectsLimiterCeiling() {
         let chain = VoiceChain()
-        chain.configure(VoicePreset.podcast.voiceChain)
+        chain.configure(VoicePreset.medium.voiceChain)
         chain.setLoudnessGain(8.0)               // extreme boost
         var buf = [Float](repeating: 0.5, count: 4800)
         buf.withUnsafeMutableBufferPointer { chain.process($0.baseAddress!, count: $0.count) }
-        let ceiling = powf(10, -1.0 / 20.0)      // podcast limiter ceiling
+        let ceiling = powf(10, -1.0 / 20.0)      // shared voice-chain limiter ceiling
         XCTAssertTrue(buf.allSatisfy { abs($0) <= ceiling + 1e-3 }, "limiter must still hold the ceiling")
     }
 

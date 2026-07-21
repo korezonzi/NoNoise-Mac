@@ -103,33 +103,90 @@ final class NoNoiseMacDSPTests: XCTestCase {
         XCTAssertEqual(mag, 0.5, accuracy: 1e-5)
     }
 
-    // MARK: - VoicePreset (Task 2)
+    // MARK: - VoicePreset (auto/strong/medium/weak/custom redesign)
 
     func testPresetCustomHasNoParameters() {
         XCTAssertNil(VoicePreset.custom.parameters)
     }
 
-    func testPresetMeetingIsFullSuppressionUnityGain() {
-        let p = VoicePreset.meeting.parameters
+    func testPresetStrongIsFullSuppressionUnityGain() {
+        let p = VoicePreset.strong.parameters
         XCTAssertEqual(p?.suppressionStrength, 1.0)
         XCTAssertEqual(p?.attenuationLimitDb, VoicePreset.maxAttenuationDb)
         XCTAssertEqual(p?.outputGain, 1.0)
     }
 
-    func testPresetPodcastKeepsNaturalFloor() {
-        // Podcast must limit attenuation (natural tone), not run unlimited.
-        let p = VoicePreset.podcast.parameters
+    func testPresetMediumKeepsNaturalFloor() {
+        // Medium must limit attenuation (natural tone), not run unlimited.
+        let p = VoicePreset.medium.parameters
         XCTAssertNotNil(p)
         XCTAssertLessThan(p!.attenuationLimitDb, VoicePreset.maxAttenuationDb)
     }
 
-    func testPresetTutorialUsesUnityOutputGain() {
-        XCTAssertEqual(VoicePreset.tutorial.parameters!.outputGain, 1.0)
+    func testPresetWeakUsesUnityOutputGain() {
+        XCTAssertEqual(VoicePreset.weak.parameters!.outputGain, 1.0)
     }
 
     func testPresetMaxAttenuationMatchesDSPSentinel() {
         // The enum sentinel must equal the DSP sentinel or the limit never disables.
         XCTAssertEqual(VoicePreset.maxAttenuationDb, DeepFilterNetDSP.maxAttenuationLimitDb)
+    }
+
+    /// `.auto`'s INITIAL parameters must equal `.medium`'s — `AutoStrengthController` takes over
+    /// dynamically from there (see AutoStrengthControllerTests), but the starting point is fixed.
+    func testPresetAutoMatchesMediumInitially() {
+        let auto = VoicePreset.auto.parameters
+        let medium = VoicePreset.medium.parameters
+        XCTAssertEqual(auto?.suppressionStrength, medium?.suppressionStrength)
+        XCTAssertEqual(auto?.attenuationLimitDb, medium?.attenuationLimitDb)
+        XCTAssertEqual(auto?.outputGain, medium?.outputGain)
+    }
+
+    /// Every preset (including `.custom`) shares one voice-chain configuration — the former
+    /// Meeting-only `.disabled` gate is gone; `AudioModel.voicePolishEnabled` is the sole gate now.
+    func testAllPresetsEnableVoiceChain() {
+        for preset in VoicePreset.allCases {
+            XCTAssertTrue(preset.voiceChain.enabled, "\(preset) must enable the voice chain")
+        }
+    }
+
+    // MARK: - VoicePreset legacy migration (Meeting/Podcast/Tutorial → Strong/Medium/Weak)
+
+    func testMigratingRawValueMapsLegacyNames() {
+        XCTAssertEqual(VoicePreset.migratingRawValue("meeting"), .strong)
+        XCTAssertEqual(VoicePreset.migratingRawValue("podcast"), .medium)
+        XCTAssertEqual(VoicePreset.migratingRawValue("tutorial"), .weak)
+    }
+
+    func testMigratingRawValuePassesThroughCurrentNames() {
+        for preset in VoicePreset.allCases {
+            XCTAssertEqual(VoicePreset.migratingRawValue(preset.rawValue), preset)
+        }
+    }
+
+    func testMigratingRawValueReturnsNilForGarbage() {
+        XCTAssertNil(VoicePreset.migratingRawValue("radio"))
+    }
+
+    // MARK: - mv.preset migration scenarios (what AudioModel.loadSettings actually reads back)
+
+    /// A CURRENT user who already has `mv.preset = "custom"` persisted (their own dialed-in knobs)
+    /// must keep resolving to `.custom` after this redesign ships — this is the most common
+    /// "existing user environment" case and must not be silently remapped.
+    func testExistingCustomUserPresetStringStillResolvesToCustom() {
+        let persistedRawValue = "custom"
+        XCTAssertEqual(VoicePreset.migratingRawValue(persistedRawValue), .custom)
+    }
+
+    /// A user who last ran the app before this redesign has `mv.preset = "meeting"` persisted.
+    /// On the first launch after upgrading, that raw string must resolve to `.strong` (the exact
+    /// same DSP numbers Meeting used) rather than fail to decode / silently reset to a default.
+    func testLegacyMeetingUserPresetStringMigratesToStrong() {
+        let persistedRawValue = "meeting"
+        let resolved = VoicePreset.migratingRawValue(persistedRawValue)
+        XCTAssertEqual(resolved, .strong)
+        XCTAssertEqual(resolved?.parameters?.suppressionStrength, 1.0)
+        XCTAssertEqual(resolved?.parameters?.attenuationLimitDb, VoicePreset.maxAttenuationDb)
     }
 
     // MARK: - AI activity (suppression confidence)

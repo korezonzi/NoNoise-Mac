@@ -17,7 +17,7 @@ final class CLIArgumentsTests: XCTestCase {
             "NoNoiseMacCLI",
             "--denoise", "/tmp/noisy.wav",
             "--output", "/tmp/clean.wav",
-            "--preset", "podcast",
+            "--preset", "medium",
             "--gain", "1.25",
             "--strength", "0.8",
             "--attenuation-db", "24",
@@ -26,7 +26,7 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertEqual(mode, .denoise(AudioDenoiseOptions(
             inputPath: "/tmp/noisy.wav",
             outputPath: "/tmp/clean.wav",
-            preset: .podcast,
+            preset: .medium,
             gain: 1.25,
             strength: 0.8,
             attenuationDb: 24,
@@ -34,7 +34,9 @@ final class CLIArgumentsTests: XCTestCase {
         )))
     }
 
-    func testPresetAppliesDSPDefaultsWhenKnobsAreNotExplicit() throws {
+    /// The legacy preset name "podcast" is still accepted and resolves to its migration
+    /// target `.medium` — same DSP defaults as the current name would produce.
+    func testParsesLegacyPresetNameAsAlias() throws {
         let mode = try CLIArguments.parse([
             "NoNoiseMacCLI",
             "--denoise", "/tmp/noisy.wav",
@@ -44,10 +46,28 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertEqual(mode, .denoise(AudioDenoiseOptions(
             inputPath: "/tmp/noisy.wav",
             outputPath: "/tmp/clean.wav",
-            preset: .podcast,
+            preset: .medium,
             gain: 1.0,
-            strength: 1.0,
-            attenuationDb: 24.0,
+            strength: 0.88,
+            attenuationDb: 32.0,
+            shouldOverwrite: false
+        )))
+    }
+
+    func testPresetAppliesDSPDefaultsWhenKnobsAreNotExplicit() throws {
+        let mode = try CLIArguments.parse([
+            "NoNoiseMacCLI",
+            "--denoise", "/tmp/noisy.wav",
+            "--output", "/tmp/clean.wav",
+            "--preset", "medium"
+        ])
+        XCTAssertEqual(mode, .denoise(AudioDenoiseOptions(
+            inputPath: "/tmp/noisy.wav",
+            outputPath: "/tmp/clean.wav",
+            preset: .medium,
+            gain: 1.0,
+            strength: 0.88,
+            attenuationDb: 32.0,
             shouldOverwrite: false
         )))
     }
@@ -57,7 +77,7 @@ final class CLIArgumentsTests: XCTestCase {
             "NoNoiseMacCLI",
             "--denoise", "/tmp/noisy.wav",
             "--output", "/tmp/clean.wav",
-            "--preset", "podcast",
+            "--preset", "medium",
             "--attenuation-db", "18"
         ])
         if case .denoise(let options) = mode {

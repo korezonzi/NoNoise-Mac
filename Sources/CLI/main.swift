@@ -18,7 +18,8 @@ case .help:
     Usage:
       NoNoiseMacCLI --in <device> --out <device> [--gain <float>]
       NoNoiseMacCLI --action <verb>
-      NoNoiseMacCLI --denoise <input-audio-file> --output <output-audio-file> [--preset meeting|podcast|tutorial|custom] [--gain <float>] [--strength <0...1>] [--attenuation-db <float>] [--overwrite]
+      NoNoiseMacCLI --denoise <input-audio-file> --output <output-audio-file> [--preset auto|strong|medium|weak|custom] [--gain <float>] [--strength <0...1>] [--attenuation-db <float>] [--overwrite]
+      (legacy preset names meeting|podcast|tutorial are still accepted as aliases)
 
     Action verbs (send a one-shot control to the running app via URL scheme):
       toggle         Toggle Noise Cancellation
