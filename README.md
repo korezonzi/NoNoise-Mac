@@ -97,22 +97,25 @@ sudo ./install-driver.sh         # 仮想デバイス導入（coreaudiod再起�
 ### 音声フロー
 
 ```mermaid
+%% 受信パスを先に定義しているのはレイアウト都合（送信パスが上に描画される）
 flowchart LR
+    subgraph IN["受信パス（相手 → 自分）"]
+        direction LR
+        APP2["通話アプリ"] --> SPK["NoNoise Speaker<br/>仮想出力"]
+        SPK -. "nn_ring" .-> STAP["NoNoise Speaker Tap<br/>hidden input"]
+        STAP --> SCE["SpeakerCleanupEngine<br/>DeepFilterNet3のみ"]
+        SYS["全システム音声<br/>NoNoise自身は除外"] --> PTAP["Process Tap<br/>macOS 14.4+<br/>元音はミュート"]
+        PTAP --> ICE["IncomingCleanupEngine<br/>DeepFilterNet3のみ"]
+        SCE --> OUTDEV["物理スピーカー<br/>ヘッドホン"]
+        ICE --> OUTDEV
+    end
+
     subgraph OUT["送信パス（自分 → 相手）"]
+        direction LR
         MIC["物理マイク"] --> AM["AudioModel<br/>DeepFilterNet3 → VoiceChain"]
         AM --> ENG["NoNoise Mic Engine<br/>hidden output"]
         ENG -. "nn_ring" .-> VMIC["NoNoise Mic<br/>仮想入力"]
         VMIC --> APP1["通話アプリ<br/>LINE / Meet / Zoom"]
-    end
-
-    subgraph IN["受信パス（相手 → 自分）"]
-        APP2["通話アプリ"] --> SPK["NoNoise Speaker<br/>仮想出力"]
-        SPK -. "nn_ring" .-> STAP["NoNoise Speaker Tap<br/>hidden input"]
-        STAP --> SCE["SpeakerCleanupEngine<br/>DeepFilterNet3のみ"]
-        SYS["全システム音声<br/>NoNoise自身は除外"] --> PTAP["Process Tap<br/>macOS 14.4+・元音はミュート"]
-        PTAP --> ICE["IncomingCleanupEngine<br/>DeepFilterNet3のみ"]
-        SCE --> OUTDEV["物理スピーカー / ヘッドホン"]
-        ICE --> OUTDEV
     end
 ```
 
@@ -123,19 +126,20 @@ flowchart LR
 `NoNoiseMic.driver` は `coreaudiod` 内で動く自作の **AudioServerPlugIn** です。BlackHole（GPL-3.0）には依存せず、Appleの公開API `<CoreAudio/AudioServerPlugIn.h>` に対する独自実装として MIT で配布しています。1つのプラグインが4デバイスを公開します。
 
 ```mermaid
-flowchart TB
+%% スピーカー側を先に定義しているのはレイアウト都合（マイク側が左に描画される）
+flowchart LR
     subgraph DRV["NoNoiseMic.driver（AudioServerPlugIn / coreaudiod内）"]
-        subgraph M["マイク側"]
-            E["NoNoise Mic Engine<br/>hidden・output<br/>NoNoiseMic:engine:48k2ch"] --> R1(["共有リング gRing"])
-            R1 --> V["NoNoise Mic<br/>visible・input<br/>NoNoiseMic:visible:48k2ch"]
-        end
         subgraph S["スピーカー側"]
-            SP["NoNoise Speaker<br/>visible・output<br/>NoNoiseSpk:visible:48k2ch"] --> R2(["共有リング gRingSpk"])
-            R2 --> ST["NoNoise Speaker Tap<br/>hidden・input<br/>NoNoiseSpk:tap:48k2ch"]
+            direction TB
+            SP["NoNoise Speaker<br/>visible・output<br/>NoNoiseSpk:visible:48k2ch<br/><br/>通話アプリが選ぶ"] --> R2(["共有リング gRingSpk"])
+            R2 --> ST["NoNoise Speaker Tap<br/>hidden・input<br/>NoNoiseSpk:tap:48k2ch<br/><br/>NoNoiseが読み出す"]
+        end
+        subgraph M["マイク側"]
+            direction TB
+            E["NoNoise Mic Engine<br/>hidden・output<br/>NoNoiseMic:engine:48k2ch<br/><br/>NoNoiseが書き込む"] --> R1(["共有リング gRing"])
+            R1 --> V["NoNoise Mic<br/>visible・input<br/>NoNoiseMic:visible:48k2ch<br/><br/>通話アプリが選ぶ"]
         end
     end
-    APPW["アプリが録音するデバイス"] -.-> V
-    SP -.-> APPR["アプリが再生するデバイス"]
 ```
 
 - フォーマットは 48kHz / 2ch / interleaved Float32 固定。各デバイスは `nn_clock`（ゼロタイムスタンプ方式・初回StartIOでアンカー）を持つ
