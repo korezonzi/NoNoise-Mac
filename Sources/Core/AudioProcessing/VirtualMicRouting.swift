@@ -88,6 +88,34 @@ public enum VirtualMicRouting {
         resolvedOutputDeviceID == previousOutputDeviceID
     }
 
+    /// What to do when the MAIN playback engine (pinned to the hidden "NoNoise Mic Engine") posts
+    /// `.AVAudioEngineConfigurationChange`. macOS stops an `AVAudioEngine` BEFORE posting that
+    /// notification (Apple-documented behavior) even when it is pinned to a fixed device, so a
+    /// notification observed while the engine is running again is self-induced — our own hardware-
+    /// churn forced repin (`shouldRepinPlaybackAfterHardwareRefresh`) or a previous restart already
+    /// completed. Restarting again in that case would loop forever, so `engineRunning` (not a
+    /// pin-target comparison) is the loop-breaking signal.
+    public enum PlaybackRestartAction: Equatable {
+        case restart
+        case skip
+        case giveUp
+    }
+
+    /// - Parameters:
+    ///   - engineRunning: `engine.isRunning` observed when the notification fires.
+    ///   - consecutiveFailures: count of consecutive failed restart attempts since the last success.
+    ///   - maxAttempts: cap on consecutive restart attempts before giving up (default 3). Capping
+    ///     avoids an infinite restart loop against a persistently broken route; the next unrelated
+    ///     hardware event still triggers `shouldRepinPlaybackAfterHardwareRefresh`'s forced repin,
+    ///     so giving up here is not a permanent dead end.
+    public static func playbackRestartAction(engineRunning: Bool,
+                                             consecutiveFailures: Int,
+                                             maxAttempts: Int = 3) -> PlaybackRestartAction {
+        if engineRunning { return .skip }
+        if consecutiveFailures >= maxAttempts { return .giveUp }
+        return .restart
+    }
+
     /// Remove the virtual mic (and the hidden speaker tap) from a list of input device names
     /// (prevents a feedback loop if the user could otherwise select them as the capture source).
     /// The speaker tap is hidden so it normally wouldn't surface here — excluded defensively,

@@ -123,6 +123,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
     private var deviceRefreshWorkItem: DispatchWorkItem?
+    // Main playback engine's own AVAudioEngineConfigurationChange recovery (Bluetooth HFP profile
+    // switches, sample-rate changes, etc. stop `engine` even though it's pinned to a fixed hidden
+    // device — see `restartPlaybackEngineAfterConfigChange`).
+    private var engineConfigObserver: NSObjectProtocol?
+    private var engineRestartWorkItem: DispatchWorkItem?
+    private var consecutivePlaybackRestartFailures = 0
     private var onDemandMode: Bool { micDeviceID != 0 }
     private var shouldCapture: Bool { !onDemandMode || virtualMicInUse }
     
@@ -426,6 +432,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         setupPlaybackEngine()
         resolveVirtualMicLifecycle()   // arm the in-use listener + sync initial state
         installHardwareDeviceListener()
+        installEngineConfigurationChangeObserver()
         loadSettings()
         // Fixed pipeline latency: ring-buffer target (2400 samples) + one STFT frame
         // (960 samples) @ 48 kHz. Reported as the "added latency" readout, not measured.
@@ -437,6 +444,10 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         controlPumpTimer?.invalidate()
         uiPublishTimer?.invalidate()
         deviceRefreshWorkItem?.cancel()
+        engineRestartWorkItem?.cancel()
+        if let obs = engineConfigObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
         if let block = hardwareDevicesListener {
             AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
                                                    &hardwareDevicesAddr,
@@ -1195,6 +1206,69 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         // device add/remove doesn't change its source) and follows the default output via its own
         // HAL listener + AVAudioEngineConfigurationChange observer. Re-applying would needlessly
         // rebuild the tap on every hardware change.
+    }
+
+    /// Observes `.AVAudioEngineConfigurationChange` on the MAIN playback `engine` (pinned to the
+    /// hidden "NoNoise Mic Engine"). macOS stops an `AVAudioEngine` BEFORE posting this notification
+    /// even when it's pinned to a fixed device (Bluetooth HFP profile switches, sample-rate changes,
+    /// etc.), and — unlike `IncomingCleanupEngine`/`SpeakerCleanupEngine`, which re-pin to a moving
+    /// default output — nothing else observes this for the fixed-device main engine. Without this,
+    /// the engine stays stopped, the driver's `nn_ring` writeEnd stops advancing, and the virtual
+    /// mic goes silent by design (privacy: never replays stale audio) with no visible error.
+    /// Registered once in `init()` (idempotent guard) since `engine` is an instance-lifetime `let`.
+    private func installEngineConfigurationChangeObserver() {
+        guard engineConfigObserver == nil else { return }
+        engineConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            self?.scheduleEngineRestart()
+        }
+    }
+
+    /// Debounces bursts of configuration-change notifications (a single hardware event can post
+    /// several) before evaluating whether a restart is needed. 0.3s is intentionally slightly
+    /// longer than `scheduleDeviceRefresh`'s 0.25s device-churn debounce so that, when both fire
+    /// from the same hardware event, the churn-triggered forced repin (`fetchOutputDevices` →
+    /// `shouldRepinPlaybackAfterHardwareRefresh` → `setupPlaybackEngine()`) lands first and this
+    /// handler then observes an already-running engine (`.skip`) instead of racing it.
+    private func scheduleEngineRestart() {
+        engineRestartWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.restartPlaybackEngineAfterConfigChange()
+        }
+        engineRestartWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
+    }
+
+    /// Restarts the main playback engine after a configuration change, per the pure
+    /// `VirtualMicRouting.playbackRestartAction` decision. Always goes through the
+    /// `setupPlaybackEngine()` re-pin path — never a bare `engine.start()` — because a
+    /// configuration change can leave the output Audio Unit uninitialized (losing its device pin),
+    /// and starting an unpinned engine risks playing cleaned voice audio out loud on the default
+    /// output instead of feeding the hidden virtual-mic sink.
+    private func restartPlaybackEngineAfterConfigChange() {
+        let action = VirtualMicRouting.playbackRestartAction(
+            engineRunning: engine.isRunning,
+            consecutiveFailures: consecutivePlaybackRestartFailures)
+        FileHandle.standardError.write(Data("DIAG: engineConfigChange action=\(action) running=\(engine.isRunning) failures=\(consecutivePlaybackRestartFailures)\n".utf8))
+        switch action {
+        case .skip:
+            consecutivePlaybackRestartFailures = 0
+        case .giveUp:
+            errorMessage = "Could not route audio to NoNoise Mic. Restart NoNoise or reconnect the audio device."
+        case .restart:
+            let id = deviceID(forUID: VirtualMicRouting.engineDeviceUID)
+            if id != 0 && id != selectedOutputDeviceID {
+                selectedOutputDeviceID = id   // didSet re-runs setupPlaybackEngine()
+            } else {
+                setupPlaybackEngine()
+            }
+            if engine.isRunning {
+                consecutivePlaybackRestartFailures = 0
+            } else {
+                consecutivePlaybackRestartFailures += 1
+                scheduleEngineRestart()
+            }
+        }
     }
 
     private func startCapture() {

@@ -67,6 +67,48 @@ final class VirtualMicRoutingTests: XCTestCase {
         ))
     }
 
+    // MARK: - playbackRestartAction (AVAudioEngineConfigurationChange recovery for the main engine)
+    // macOS stops an AVAudioEngine BEFORE posting the configuration-change notification, so a
+    // notification observed while the engine is already running again is self-induced (our own
+    // churn repin / setupPlaybackEngine) — restarting again would loop forever. `engineRunning`
+    // is therefore the loop-breaking signal, not a pin-target comparison.
+
+    func testConfigChangeSkipsRestartWhileEngineRunning() {
+        XCTAssertEqual(VirtualMicRouting.playbackRestartAction(
+            engineRunning: true,
+            consecutiveFailures: 0
+        ), .skip)
+    }
+
+    func testConfigChangeRestartsStoppedEngine() {
+        XCTAssertEqual(VirtualMicRouting.playbackRestartAction(
+            engineRunning: false,
+            consecutiveFailures: 0
+        ), .restart)
+    }
+
+    func testConfigChangeRestartsUpToMaxAttempts() {
+        XCTAssertEqual(VirtualMicRouting.playbackRestartAction(
+            engineRunning: false,
+            consecutiveFailures: 2,
+            maxAttempts: 3
+        ), .restart)
+    }
+
+    func testConfigChangeGivesUpAtMaxAttempts() {
+        XCTAssertEqual(VirtualMicRouting.playbackRestartAction(
+            engineRunning: false,
+            consecutiveFailures: 3
+        ), .giveUp)
+    }
+
+    func testConfigChangeGivesUpBeyondMaxAttempts() {
+        XCTAssertEqual(VirtualMicRouting.playbackRestartAction(
+            engineRunning: false,
+            consecutiveFailures: 4
+        ), .giveUp)
+    }
+
     // MARK: - Speaker/tap shared contract (app↔driver) — regression guard for the literal strings.
     // These assert the exact literal values, not just `VirtualMicRouting.speaker*` round-trips,
     // so an accidental edit to the constant is caught the same way a C-side edit would be.
