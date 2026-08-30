@@ -5,6 +5,30 @@ for the must-read failure modes.
 
 ---
 
+### [GOTCHA] 2026-08-30 — macOS 26 menu-bar registration poisoning RECURS; escape by rotating the bundle id (now `.r2`)
+- **Problem**: The menu-bar icon vanished again — app process healthy, engine running, but no
+  status item. Same failure mode previously documented only in `Sources/App/NoNoiseMacApp.swift`'s
+  header: FrontBoard/ControlCenter manage status items per bundle id, and the management DB can
+  hold a poisoned "hidden" registration — the item's window is created but never adopted by the
+  layout, immune to `isVisible` pins, pref-key resets, ControlCenter restarts, and LaunchServices
+  vs raw-binary launch differences. First hit `com.ivalsaraj.NoNoiseMac` (fixed by rotating to
+  `com.korezonzi.NoNoiseMac`); this time it hit the rotated id itself.
+- **Diagnosis (probe test — the canonical procedure)**: copy the installed app, change ONLY
+  `CFBundleIdentifier` (`plutil -replace`), re-sign ad-hoc WITH the same entitlements, launch.
+  Icon draws under the fresh id → DB poisoning confirmed; no repo hunt needed. The DB itself was
+  not found in `com.apple.controlcenter` defaults (currentHost or normal) or `ByHost` — both
+  sessions failed to locate it, so surgical cleanup is not an option.
+- **Suspected triggers**: `install-app.sh` used to `rm -rf` + `ditto` the bundle UNDER a running
+  instance (it now quits the app gracefully first), and SIGINT-killing a terminal-launched
+  instance (`... | tee` + Ctrl-C). Avoid both.
+- **Rule**: When the icon disappears and a probe bundle draws, rotate `CFBundleIdentifier`
+  (`.r2` → `.r3` → …), prepend the retired id to `migrateDefaultsFromPreviousIDs`' domain list,
+  and bump its marker key so `mv.*` settings carry over. Users must re-grant mic TCC and re-enable
+  Launch at Startup once per rotation (both are keyed on the bundle id). The DRIVER id
+  (`com.ivalsaraj.NoNoiseMic`) is untouched by app-side rotations.
+- **Files**: `Resources/Info.plist`, `Sources/App/NoNoiseMacApp.swift`
+  (`migrateDefaultsFromPreviousIDs`), `install-app.sh` (graceful-quit guard).
+
 ### [GOTCHA] 2026-08-30 — A pinned AVAudioEngine still stops on configuration change; the churn repin only covers one case
 - **Problem**: With AirPods connected, "NoNoise Mic" delivered silence to the other party in a call.
   The 2026-06-22 hardware-churn fix (`05ba0c6`) only forces a repin once, on a device-LIST change

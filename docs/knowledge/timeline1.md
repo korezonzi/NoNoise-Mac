@@ -2,6 +2,15 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-08-30 — Bundle id rotated to `com.korezonzi.NoNoiseMac.r2` (menu-bar poisoning recurred)
+- **What:** The macOS 26 menu-bar registration poisoning (first seen on `com.ivalsaraj.NoNoiseMac`)
+  recurred on `com.korezonzi.NoNoiseMac` — icon gone, app healthy, probe bundle under a fresh id
+  draws fine. Rotated `CFBundleIdentifier` to `.r2`, generalized the one-shot defaults migration
+  to a newest-first domain chain (`migrateDefaultsFromPreviousIDs`), and added a graceful-quit
+  guard to `install-app.sh` so the bundle is never replaced under a running instance (the
+  suspected trigger). See the knowledge entry for the probe procedure and rotation rule.
+- **User impact:** one-time mic-permission re-grant + Launch-at-Startup re-enable.
+
 ### 2026-08-30 — Restart the main playback engine after configuration change; extra device-refresh triggers
 - **What:** Added `VirtualMicRouting.playbackRestartAction` (tested: skip while running, restart while
   stopped, give up past `maxAttempts`) and wired `AudioModel` to observe
