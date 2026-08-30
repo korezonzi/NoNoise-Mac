@@ -2,6 +2,31 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-08-30 — Restart the main playback engine after configuration change; extra device-refresh triggers
+- **What:** Added `VirtualMicRouting.playbackRestartAction` (tested: skip while running, restart while
+  stopped, give up past `maxAttempts`) and wired `AudioModel` to observe
+  `.AVAudioEngineConfigurationChange` on the main playback engine, restarting it through
+  `setupPlaybackEngine()`'s re-pin path on a debounced timer. Also added
+  `kAudioHardwarePropertyDefaultOutputDevice` / `kAudioHardwarePropertyDefaultInputDevice` listeners
+  that feed the existing debounced `scheduleDeviceRefresh()` (a trigger only — playback still stays
+  pinned to the hidden engine device, not the default).
+- **Why:** With AirPods connected, "NoNoise Mic" delivered silence to call partners. The 2026-06-22
+  churn repin (`05ba0c6`) only fires once, on the device-list change right after connect; a later
+  Bluetooth HFP profile switch stops the pinned `AVAudioEngine` (macOS stops the engine before
+  posting the configuration-change notification, even for a fixed-device pin) with no observer to
+  restart it, so the driver's `nn_ring` writeEnd stalls and the driver serves silence by design.
+  Disconnecting reproduces the device-list churn again, which "fixes" it — matching "silent for the
+  whole time connected."
+- **Safety:** Loop-breaking uses `engine.isRunning`, not a pin-target comparison — a notification
+  observed while the engine is already running is self-induced (our own churn repin, or a prior
+  restart that already succeeded). Restart always goes through `setupPlaybackEngine()`, never a bare
+  `engine.start()`, to avoid restoring an unpinned graph that could play cleaned voice out loud on
+  the default output.
+- **Tests:** `swift test --filter VirtualMicRoutingTests` (RED confirmed before implementation, then
+  GREEN); full `swift test` (287 tests) before each commit.
+- **Files:** `Sources/Core/AudioProcessing/VirtualMicRouting.swift`, `Sources/Core/AudioModel.swift`,
+  `Tests/NoNoiseMacTests/VirtualMicRoutingTests.swift`, `docs/knowledge/knowledge1.md`.
+
 ### 2026-07-12 — Launch at Startup setting
 - **What:** added a General Settings toggle that starts the NoNoise Mac menu-bar app when the user logs in.
 - **How:** uses `SMAppService.mainApp` as the system-owned source of truth, with approval and recoverable error guidance in the UI; no duplicate preference, helper, LaunchAgent, or entitlement was added.

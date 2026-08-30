@@ -5,6 +5,33 @@ for the must-read failure modes.
 
 ---
 
+### [GOTCHA] 2026-08-30 — A pinned AVAudioEngine still stops on configuration change; the churn repin only covers one case
+- **Problem**: With AirPods connected, "NoNoise Mic" delivered silence to the other party in a call.
+  The 2026-06-22 hardware-churn fix (`05ba0c6`) only forces a repin once, on a device-LIST change
+  right after connect. A subsequent Bluetooth HFP profile switch stops the main playback `engine`
+  (pinned to the hidden "NoNoise Mic Engine") without ever touching `kAudioHardwarePropertyDevices`,
+  so no listener fires again and nothing restarts it.
+- **Root cause**: macOS stops an `AVAudioEngine` BEFORE posting `.AVAudioEngineConfigurationChange`
+  (Apple-documented), even when it's pinned to a fixed device — pinning does not make the engine
+  immune to configuration changes. The main engine had no observer for that notification at all
+  (`AudioModel.swift`, pre-fix: only a `kAudioHardwarePropertyDevices` listener). With the engine
+  stopped, the virtual driver's `nn_ring` `writeEnd` stops advancing, and the driver serves silence
+  by design (the same privacy rule that keeps it from replaying stale audio) — so nothing errors
+  anywhere; the mic just goes quiet. Disconnecting AirPods reproduces the device-list churn again,
+  which force-repins and "fixes" it — consistent with "silent for the entire time connected."
+- **Rule**: Any long-lived `AVAudioEngine` pinned to a specific output device MUST observe
+  `.AVAudioEngineConfigurationChange` and restart through its normal setup path (here,
+  `setupPlaybackEngine()`, never a bare `engine.start()` — a configuration change can leave the
+  output Audio Unit uninitialized/unpinned, and starting unpinned risks playing cleaned voice out
+  loud on the default output). Break the restart loop on `engine.isRunning`, not on a pin-target
+  comparison: macOS stops the engine before posting the notification, so a notification observed
+  while the engine is ALREADY running again is self-induced (our own churn repin, or a prior restart
+  that already succeeded) — restarting again would loop. This decision is a pure, headless-tested
+  static (`VirtualMicRouting.playbackRestartAction`), mirroring the churn predicate added in `05ba0c6`.
+- **Files**: `Sources/Core/AudioModel.swift` (`installEngineConfigurationChangeObserver`,
+  `scheduleEngineRestart`, `restartPlaybackEngineAfterConfigChange`),
+  `Sources/Core/AudioProcessing/VirtualMicRouting.swift` (`playbackRestartAction`).
+
 ### [DECISION] 2026-06-16 — Clean Incoming rewritten to a Core Audio process tap; the 2026-06-15 BlackHole entries are SUPERSEDED (@Valsaraj)
 - **Problem**: The 2026-06-15 incoming-cleanup design (entries below) used an `AVCaptureSession` on a
   user-chosen **loopback/BlackHole** source plus a user-chosen **monitor output**, with source/monitor
