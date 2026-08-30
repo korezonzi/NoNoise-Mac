@@ -137,6 +137,9 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
     private var deviceRefreshWorkItem: DispatchWorkItem?
+    // Coalesces the repin intent across a debounce window: device-list churn triggers must keep
+    // their forced repin even when a later default-device flip re-schedules the same refresh.
+    private var pendingRefreshForcesRepin = false
     // Main playback engine's own AVAudioEngineConfigurationChange recovery (Bluetooth HFP profile
     // switches, sample-rate changes, etc. stop `engine` even though it's pinned to a fixed hidden
     // device — see `restartPlaybackEngineAfterConfigChange`).
@@ -971,7 +974,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
                                             hasOutput: hasOutput)
     }
 
-    func fetchOutputDevices() {
+    func fetchOutputDevices(forceRepin: Bool = true) {
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -1028,7 +1031,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
                 let resolvedRouteID = uidToID[uid] ?? self.deviceID(forUID: uid)
                 self.selectedOutputDeviceID = resolvedRouteID
                 if uid == VirtualMicRouting.engineDeviceUID { self.activeOutputDeviceName = VirtualMicRouting.engineDeviceName }
-                if VirtualMicRouting.shouldRepinPlaybackAfterHardwareRefresh(
+                if forceRepin, VirtualMicRouting.shouldRepinPlaybackAfterHardwareRefresh(
                     preferredRouteUID: uid,
                     previousOutputDeviceID: previousOutputDeviceID,
                     resolvedOutputDeviceID: resolvedRouteID
@@ -1077,6 +1080,13 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         
         do {
             try engine.start()
+            // A successful (re)start is ground truth that routing works again — clear the restart
+            // failure streak and any stale routing error regardless of which path started the
+            // engine (config-change handler, churn repin, or a manual device pick). Without this,
+            // `.giveUp` would be an absorbing state: its only other exit is a `.skip`, which never
+            // comes while the engine stays stopped.
+            consecutivePlaybackRestartFailures = 0
+            if errorMessage != nil { errorMessage = nil }
             FileHandle.standardError.write(Data("DIAG: engine started, out=\(selectedOutputDeviceID)\n".utf8))
         } catch {
             print("Engine Error: \(error)")
@@ -1205,6 +1215,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     }
 
     private func installHardwareDeviceListener() {
+        guard hardwareDevicesListener == nil else { return }   // idempotent: 3 listeners, 1 registration
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.scheduleDeviceRefresh()
         }
@@ -1218,9 +1229,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         // switch or a Bluetooth profile change can leave kAudioHardwarePropertyDevices untouched),
         // so they need their own listeners. Both just funnel into the same debounced device refresh
         // — this is a trigger only; playback stays pinned to the hidden engine device, it does not
-        // follow the new default.
+        // follow the new default. `forceRepin: false` because a default flip alone never invalidates
+        // the pinned engine route: forcing `setupPlaybackEngine()` here would stop/start the engine
+        // (an audible dropout for the far side of a call) on every output switch. If the flip's
+        // configuration change really stopped the engine, the config-change observer restarts it.
         let defaultOutputBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.scheduleDeviceRefresh()
+            self?.scheduleDeviceRefresh(forceRepin: false)
         }
         defaultOutputListener = defaultOutputBlock
         AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
@@ -1229,7 +1243,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
                                             defaultOutputBlock)
 
         let defaultInputBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.scheduleDeviceRefresh()
+            self?.scheduleDeviceRefresh(forceRepin: false)
         }
         defaultInputListener = defaultInputBlock
         AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
@@ -1238,18 +1252,22 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
                                             defaultInputBlock)
     }
 
-    private func scheduleDeviceRefresh() {
+    private func scheduleDeviceRefresh(forceRepin: Bool = true) {
+        pendingRefreshForcesRepin = pendingRefreshForcesRepin || forceRepin
         deviceRefreshWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            self?.refreshDevicesAfterHardwareChange()
+            guard let self else { return }
+            let force = self.pendingRefreshForcesRepin
+            self.pendingRefreshForcesRepin = false
+            self.refreshDevicesAfterHardwareChange(forceRepin: force)
         }
         deviceRefreshWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: item)
     }
 
-    private func refreshDevicesAfterHardwareChange() {
+    private func refreshDevicesAfterHardwareChange(forceRepin: Bool = true) {
         fetchInputDevices()
-        fetchOutputDevices()
+        fetchOutputDevices(forceRepin: forceRepin)
         resolveVirtualMicLifecycle()
         // The incoming tap engine is NOT re-applied here: it captures all-system-minus-NoNoise (so
         // device add/remove doesn't change its source) and follows the default output via its own
@@ -1274,18 +1292,23 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     }
 
     /// Debounces bursts of configuration-change notifications (a single hardware event can post
-    /// several) before evaluating whether a restart is needed. 0.3s is intentionally slightly
+    /// several) before evaluating whether a restart is needed. The first delay (0.3s) is slightly
     /// longer than `scheduleDeviceRefresh`'s 0.25s device-churn debounce so that, when both fire
-    /// from the same hardware event, the churn-triggered forced repin (`fetchOutputDevices` →
-    /// `shouldRepinPlaybackAfterHardwareRefresh` → `setupPlaybackEngine()`) lands first and this
-    /// handler then observes an already-running engine (`.skip`) instead of racing it.
+    /// from the same hardware event, the churn-triggered forced repin usually lands first and this
+    /// handler then observes an already-running engine (`.skip`). Notification order isn't
+    /// guaranteed, but the reverse order merely restarts once here and `.skip`s the rest.
+    /// Retries back off (0.3s → 1s → 3s): a Bluetooth profile transition can keep the HAL device
+    /// pin failing for a few seconds, and burning every attempt inside ~1s would strand the engine
+    /// in `.giveUp` — permanently silent again — right after the transition settles.
     private func scheduleEngineRestart() {
         engineRestartWorkItem?.cancel()
+        let delays: [TimeInterval] = [0.3, 1.0, 3.0]
+        let delay = delays[min(consecutivePlaybackRestartFailures, delays.count - 1)]
         let item = DispatchWorkItem { [weak self] in
             self?.restartPlaybackEngineAfterConfigChange()
         }
         engineRestartWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     /// Restarts the main playback engine after a configuration change, per the pure

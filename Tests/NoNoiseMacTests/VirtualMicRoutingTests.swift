@@ -109,6 +109,15 @@ final class VirtualMicRoutingTests: XCTestCase {
         ), .giveUp)
     }
 
+    func testConfigChangeSkipsEvenAfterGivingUp() {
+        // `engineRunning` must outrank the failure count: a running engine (e.g. restarted by a
+        // later churn repin) resets the streak via `.skip` — the recovery exit out of `.giveUp`.
+        XCTAssertEqual(VirtualMicRouting.playbackRestartAction(
+            engineRunning: true,
+            consecutiveFailures: 5
+        ), .skip)
+    }
+
     // MARK: - Speaker/tap shared contract (app↔driver) — regression guard for the literal strings.
     // These assert the exact literal values, not just `VirtualMicRouting.speaker*` round-trips,
     // so an accidental edit to the constant is caught the same way a C-side edit would be.
