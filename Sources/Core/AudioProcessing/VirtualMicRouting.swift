@@ -116,6 +116,24 @@ public enum VirtualMicRouting {
         return .restart
     }
 
+    /// Sentinel persisted under `mv.inputDeviceUID` meaning "follow the system default input".
+    public static let autoInputSelection = "auto"
+
+    /// Which input UID to capture from. `available` MUST already be NoNoise-filtered (see
+    /// `filterInputs`) — membership in it is the loop guard: a system default of "NoNoise Mic"
+    /// is never in `available`, so auto mode falls through to `current`/first instead of ever
+    /// capturing our own virtual mic. Fallback order — manual: saved → default → current → first;
+    /// auto: default → current → first.
+    public static func resolveInputDeviceUID(selection: String,
+                                             available: [String],
+                                             defaultUID: String?,
+                                             current: String?) -> String? {
+        if selection != autoInputSelection, available.contains(selection) { return selection }
+        if let d = defaultUID, available.contains(d) { return d }
+        if let c = current, available.contains(c) { return c }
+        return available.first
+    }
+
     /// Remove the virtual mic (and the hidden speaker tap) from a list of input device names
     /// (prevents a feedback loop if the user could otherwise select them as the capture source).
     /// The speaker tap is hidden so it normally wouldn't surface here — excluded defensively,

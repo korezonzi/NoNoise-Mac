@@ -20,6 +20,18 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
              setupCaptureSession()
         }
     }
+    /// User's input choice: either `VirtualMicRouting.autoInputSelection` ("follow the system
+    /// default input") or a saved manual device UID. `selectedInputDeviceID` (above) is the
+    /// RESOLVED, actually-captured device — this is the user's INTENT, persisted under
+    /// `mv.inputDeviceUID` and re-resolved via `applyInputSelection()` on every change.
+    @Published public var inputDeviceSelection: String = VirtualMicRouting.autoInputSelection {
+        didSet {
+            guard !isApplyingPreset else { return }
+            guard inputDeviceSelection != oldValue else { return }
+            UserDefaults.standard.set(inputDeviceSelection, forKey: PrefKey.inputDevice)
+            applyInputSelection()
+        }
+    }
     @Published public var errorMessage: String?
     @Published public var activeOutputDeviceName: String = "Unknown"
     @Published public var permissionStatus: String = "Unknown"
@@ -347,6 +359,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         static let profiles = SettingsResetPolicy.profilesKey   // Voice Profiles (JSON array)
         static let loudnessNorm = SettingsResetPolicy.loudnessNormKey
         static let loudnessTarget = SettingsResetPolicy.loudnessTargetKey
+        static let inputDevice = SettingsResetPolicy.inputDeviceKey
     }
 
     public struct DeviceStruct: Identifiable {
@@ -684,6 +697,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         speakerCleanupEnabled = false
         loudnessNormEnabled = false
         loudnessTargetLUFS = -14
+        inputDeviceSelection = VirtualMicRouting.autoInputSelection
         isApplyingPreset = false
         syncAutoState(for: .auto)   // direct assignment above bypasses applyPreset's own call
 
@@ -697,6 +711,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         applyVoiceChain()
         applyIncomingCleanup()
         applySpeakerCleanup()
+        applyInputSelection()   // inputDeviceSelection.didSet was suppressed above (isApplyingPreset)
         persistSettings()
         persistIncomingSettings()
         persistSpeakerSettings()
@@ -710,6 +725,16 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         // see it on relaunch. Tolerant: corrupt/absent → empty array.
         if let data = d.data(forKey: PrefKey.profiles) {
             profiles = VoiceProfileStore.decodeSafe(from: data).profiles
+        }
+        // Input device selection persists independently of the Tier 1 preset key below (same
+        // rationale as profiles above), so it's restored before the early return too. Guarded by
+        // isApplyingPreset so the didSet doesn't call applyInputSelection() here — at this point in
+        // init() fetchInputDevices()'s async completion hasn't populated `inputDevices` yet, so the
+        // actual resolve happens there once it does (see applyInputSelection's doc comment).
+        if let savedInputSelection = d.string(forKey: PrefKey.inputDevice) {
+            isApplyingPreset = true
+            inputDeviceSelection = savedInputSelection
+            isApplyingPreset = false
         }
         guard let raw = d.string(forKey: PrefKey.preset),
               let preset = VoicePreset.migratingRawValue(raw) else {
@@ -1141,20 +1166,30 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         
         DispatchQueue.main.async {
             self.inputDevices = devs
-            if devs.contains(where: { $0.uniqueID == self.selectedInputDeviceID }) {
-                return
-            }
-            if let defaultDev = AVCaptureDevice.default(for: .audio),
-               devs.contains(where: { $0.uniqueID == defaultDev.uniqueID }) {
-                self.selectedInputDeviceID = defaultDev.uniqueID
-            } else if let first = devs.first {
-                self.selectedInputDeviceID = first.uniqueID
-            } else {
-                self.selectedInputDeviceID = ""
-            }
+            self.applyInputSelection()
         }
     }
-    
+
+    /// Resolve `inputDeviceSelection` (the `.auto` sentinel or a saved manual UID) against the
+    /// current device list + system default via `VirtualMicRouting.resolveInputDeviceUID`, and
+    /// update `selectedInputDeviceID` only when the resolved target actually changed (avoids a
+    /// redundant `setupCaptureSession()` restart on every call). Main-thread only.
+    ///
+    /// Default-input follow is wired with ZERO extra plumbing: the existing
+    /// `defaultInputListener` → `scheduleDeviceRefresh` → `refreshDevicesAfterHardwareChange` →
+    /// `fetchInputDevices()` chain already re-runs on every default-input change, and
+    /// `fetchInputDevices()`'s completion calls this — so `.auto` re-resolves automatically
+    /// whenever the system default changes (e.g. headphones connect/disconnect).
+    private func applyInputSelection() {
+        let resolved = VirtualMicRouting.resolveInputDeviceUID(
+            selection: inputDeviceSelection,
+            available: inputDevices.map { $0.uniqueID },
+            defaultUID: AVCaptureDevice.default(for: .audio)?.uniqueID,
+            current: selectedInputDeviceID.isEmpty ? nil : selectedInputDeviceID)
+        let target = resolved ?? ""
+        if target != selectedInputDeviceID { selectedInputDeviceID = target }
+    }
+
     func setupCaptureSession() {
         captureSession.stopRunning()
         captureSession.beginConfiguration()

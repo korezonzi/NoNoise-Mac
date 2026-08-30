@@ -196,4 +196,74 @@ final class VirtualMicRoutingTests: XCTestCase {
                     dev("MacBook Speakers")]
         XCTAssertEqual(VirtualMicRouting.preferredOutputUID(from: list), "BH-uid")
     }
+
+    // MARK: - resolveInputDeviceUID (auto / manual input selection)
+    // `available` is always assumed already NoNoise-filtered (see `filterInputs`) — membership in
+    // it is the loop guard the function relies on, so these tests use plain synthetic UIDs.
+
+    func testInputSelectionManualPrefersSavedUID() {
+        XCTAssertEqual(VirtualMicRouting.resolveInputDeviceUID(
+            selection: "saved-uid",
+            available: ["saved-uid", "other-uid"],
+            defaultUID: "other-uid",
+            current: "other-uid"
+        ), "saved-uid")
+    }
+
+    func testInputSelectionManualFallsBackToDefaultWhenSavedMissing() {
+        // Saved UID no longer available (device unplugged) → falls through to the system default.
+        XCTAssertEqual(VirtualMicRouting.resolveInputDeviceUID(
+            selection: "missing-uid",
+            available: ["a-uid", "b-uid"],
+            defaultUID: "b-uid",
+            current: "a-uid"
+        ), "b-uid")
+    }
+
+    func testInputSelectionAutoFollowsDefault() {
+        XCTAssertEqual(VirtualMicRouting.resolveInputDeviceUID(
+            selection: VirtualMicRouting.autoInputSelection,
+            available: ["a-uid", "b-uid"],
+            defaultUID: "b-uid",
+            current: "a-uid"
+        ), "b-uid")
+    }
+
+    func testInputSelectionAutoIgnoresDefaultNotInList() {
+        // The system default resolved to something outside our (NoNoise-filtered) list — e.g. it
+        // resolved to "NoNoise Mic" itself, which `filterInputs` already excluded. Auto mode must
+        // not loop back onto it; stays on the current device instead.
+        XCTAssertEqual(VirtualMicRouting.resolveInputDeviceUID(
+            selection: VirtualMicRouting.autoInputSelection,
+            available: ["a-uid", "b-uid"],
+            defaultUID: "not-in-list-uid",
+            current: "a-uid"
+        ), "a-uid")
+    }
+
+    func testInputSelectionFallsBackToCurrentThenFirst() {
+        // No default at all → current (still available) wins.
+        XCTAssertEqual(VirtualMicRouting.resolveInputDeviceUID(
+            selection: VirtualMicRouting.autoInputSelection,
+            available: ["a-uid", "b-uid"],
+            defaultUID: nil,
+            current: "a-uid"
+        ), "a-uid")
+        // No default AND current no longer available → falls through to the first entry.
+        XCTAssertEqual(VirtualMicRouting.resolveInputDeviceUID(
+            selection: VirtualMicRouting.autoInputSelection,
+            available: ["a-uid", "b-uid"],
+            defaultUID: nil,
+            current: "gone-uid"
+        ), "a-uid")
+    }
+
+    func testInputSelectionEmptyListReturnsNil() {
+        XCTAssertNil(VirtualMicRouting.resolveInputDeviceUID(
+            selection: VirtualMicRouting.autoInputSelection,
+            available: [],
+            defaultUID: "b-uid",
+            current: "a-uid"
+        ))
+    }
 }
