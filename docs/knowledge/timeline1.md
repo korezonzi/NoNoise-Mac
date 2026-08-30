@@ -9,7 +9,11 @@ Chronological log of notable changes. Newest on top.
   `setupPlaybackEngine()`'s re-pin path on a debounced timer. Also added
   `kAudioHardwarePropertyDefaultOutputDevice` / `kAudioHardwarePropertyDefaultInputDevice` listeners
   that feed the existing debounced `scheduleDeviceRefresh()` (a trigger only — playback still stays
-  pinned to the hidden engine device, not the default).
+  pinned to the hidden engine device, not the default). Review hardening (same day): restart retries
+  back off 0.3s → 1s → 3s; a successful `engine.start()` in `setupPlaybackEngine()` resets the
+  failure streak and clears the routing `errorMessage` (so `.giveUp` isn't absorbing); the
+  default-device listeners pass `forceRepin: false` so a mere output switch no longer stop/starts
+  the engine mid-call.
 - **Why:** With AirPods connected, "NoNoise Mic" delivered silence to call partners. The 2026-06-22
   churn repin (`05ba0c6`) only fires once, on the device-list change right after connect; a later
   Bluetooth HFP profile switch stops the pinned `AVAudioEngine` (macOS stops the engine before

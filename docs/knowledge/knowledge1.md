@@ -28,8 +28,22 @@ for the must-read failure modes.
   while the engine is ALREADY running again is self-induced (our own churn repin, or a prior restart
   that already succeeded) — restarting again would loop. This decision is a pure, headless-tested
   static (`VirtualMicRouting.playbackRestartAction`), mirroring the churn predicate added in `05ba0c6`.
+- **Recovery rules (review hardening, same day)**: restart retries back off (0.3s → 1s → 3s) because
+  a Bluetooth profile transition can keep the HAL pin failing for a few seconds — burning all
+  attempts inside ~1s would strand the handler in `.giveUp`. `.giveUp` (after `maxAttempts=3`) shows
+  the routing `errorMessage` but is NOT terminal: any successful `engine.start()` inside
+  `setupPlaybackEngine()` (config-change handler, churn repin, or a manual device pick) resets the
+  failure streak AND clears the error. Without that reset, `.giveUp` is an absorbing state — its
+  only other exit is a `.skip`, which never comes while the engine stays stopped.
+- **Default-device listeners refresh, they don't repin**: the same fix added
+  `kAudioHardwarePropertyDefaultOutputDevice`/`DefaultInputDevice` listeners (default flips — wired
+  jack data-source switches, BT profile changes — don't always touch `kAudioHardwarePropertyDevices`).
+  They call `scheduleDeviceRefresh(forceRepin: false)`: a default flip alone never invalidates the
+  pinned engine route, and forcing `setupPlaybackEngine()` on every output switch would stop/start
+  the engine mid-call (audible dropout for the far side). If the flip's configuration change really
+  stopped the engine, the config-change observer restarts it.
 - **Files**: `Sources/Core/AudioModel.swift` (`installEngineConfigurationChangeObserver`,
-  `scheduleEngineRestart`, `restartPlaybackEngineAfterConfigChange`),
+  `scheduleEngineRestart`, `restartPlaybackEngineAfterConfigChange`, `scheduleDeviceRefresh`),
   `Sources/Core/AudioProcessing/VirtualMicRouting.swift` (`playbackRestartAction`).
 
 ### [DECISION] 2026-06-16 — Clean Incoming rewritten to a Core Audio process tap; the 2026-06-15 BlackHole entries are SUPERSEDED (@Valsaraj)
