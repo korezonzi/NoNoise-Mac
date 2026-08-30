@@ -29,6 +29,7 @@ struct ContentView: View {
             mouthNoiseCard
             devicesCard
             driverStatusRow
+            micPermissionRow
             footer
         }
         .animation(.easeInOut(duration: 0.18), value: dispatcher.isBypassed)
@@ -36,7 +37,10 @@ struct ContentView: View {
         .frame(width: 320)
         // Drive the gated UI-meter publish loop only while the popover is on screen. The control
         // pump (Smart Level + loudness) keeps running always — see AudioModel.beginMeterObservation.
-        .onAppear { audioModel.beginMeterObservation(.popover) }
+        .onAppear {
+            audioModel.beginMeterObservation(.popover)
+            audioModel.refreshMicPermissionStatus()
+        }
         .onDisappear { audioModel.endMeterObservation(.popover) }
     }
 
@@ -382,6 +386,30 @@ struct ContentView: View {
             Spacer()
         }
         .nnCard()
+    }
+
+    // MARK: - Mic permission warning
+    // Only shown when macOS has actually blocked mic access — checked read-only on every popover
+    // open (refreshMicPermissionStatus never triggers the system prompt), so Denied/Restricted is
+    // never silent (the previous state had no UI signal at all for this failure mode).
+    @ViewBuilder
+    private var micPermissionRow: some View {
+        if audioModel.isMicPermissionBlocked {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("マイクへのアクセスが許可されていません").font(.caption).fontWeight(.medium)
+                    Text("システム設定 ▸ プライバシーとセキュリティ ▸ マイク で NoNoise Mac を許可してください。")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("開く") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+                }
+                .controlSize(.small)
+            }
+            .nnCard()
+        }
     }
 
     // MARK: - Footer

@@ -1107,7 +1107,24 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         @unknown default: permissionStatus = "Unknown"
         }
     }
-    
+
+    /// Read-only permission re-check — never triggers the system prompt (unlike checkPermissions(),
+    /// which requests access on .notDetermined), so it is safe to call on every popover open.
+    public func refreshMicPermissionStatus() {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: permissionStatus = "Authorized"
+        case .denied: permissionStatus = "Denied"
+        case .restricted: permissionStatus = "Restricted"
+        case .notDetermined: permissionStatus = "Not Determined"
+        @unknown default: permissionStatus = "Unknown"
+        }
+    }
+
+    /// True when the mic permission is known to block capture — drives the popover's warning row.
+    public var isMicPermissionBlocked: Bool {
+        permissionStatus == "Denied" || permissionStatus == "Restricted"
+    }
+
     func fetchInputDevices() {
         // AVCaptureDeviceDiscovery
         let types: [AVCaptureDevice.DeviceType] = [.builtInMicrophone, .externalUnknown] // .externalUnknown covers USB mics usually
