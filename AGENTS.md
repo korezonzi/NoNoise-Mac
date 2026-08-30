@@ -220,6 +220,18 @@ Do not add entitlements beyond these two without a measured, documented need.
 - **`.auto`** starts at `.medium`'s numbers, then `AudioModel.updateAutoStrength()` (called every control-pump tick, see "Metering & loudness" below) drives live `suppressionStrength`/`attenuationLimitDb` toward `.weak`/`.medium`/`.strong` via `AutoStrengthController` (Core/AudioProcessing) — a pure, headless-tested EMA + hysteresis (~30 s time constant, ~3 s stage-hold) over `DeepFilterNetDSP.aiActivity`, mirroring `SmartLevelController`'s "stateless enum + caller-owned `State`" design. Stage changes apply via `AudioModel.applyAutoStage(_:)` (same `isApplyingPreset` guard as `setOutputGainForSmartLevel`) and are NEVER persisted — only the `.auto` selection itself survives a relaunch; `autoStrengthState` resets to a fresh `.medium` start every time the preset (re)selects `.auto` (`AudioModel.syncAutoState(for:)`, called from `applyPreset`/`applyProfile`/`onKnobChanged`/`loadSettings`/`resetSettingsToDefaults` — several of those set `selectedPreset` directly under the `isApplyingPreset` guard and so never reach `applyPreset`'s own call). The current stage is published as `AudioModel.autoCurrentStage` (`VoicePreset?`, non-nil only while `.auto` is active) for the UI's "自動（いま：中）" caption — written only on an actual stage change or preset transition, NEVER unconditionally from the 25 Hz pump (would reintroduce the SwiftUI invalidation storm the meter-telemetry split removed).
 - Preset + knob state persists in `UserDefaults` under `mv.*` keys; first launch (no `mv.preset`) defaults to `.auto`. `AudioModel` itself is not unit-tested (its `init()` starts CoreAudio/AVFoundation) — the pure logic (`VoicePreset`, `AutoStrengthController`) is unit-tested and the orchestration is smoke-tested.
 - Settings reset uses `SettingsResetPolicy`: reset audio/device keys to defaults, but preserve user-created assets (`mv.profiles`) and custom hotkey bindings (`mv.hotkey.*`). Add future resettable app/audio keys to `SettingsResetPolicy.resettableKeys`; do not duplicate `mv.*` key strings elsewhere.
+- **Input-device selection contract**: `AudioModel.inputDeviceSelection` (persisted `mv.inputDeviceUID`,
+  reset by `SettingsResetPolicy`) is either `VirtualMicRouting.autoInputSelection` (`"auto"`, the
+  default — follow the system default input, so earphone connect/disconnect switches the mic
+  automatically via the existing default-input HAL listener → debounced refresh) or a manual device
+  UID. The EFFECTIVE device stays `selectedInputDeviceID`, which is NEVER persisted and is
+  re-derived by the pure, unit-tested `VirtualMicRouting.resolveInputDeviceUID` (fallback — manual:
+  saved → default → current → first; auto: default → current → first; the NoNoise self-capture loop
+  is prevented by membership in the `filterInputs`-cleaned list, not by a special case). A direct
+  `selectedInputDeviceID` write from outside is DISCARDED on the next device refresh — external
+  callers (e.g. the CLI's `--in`) must set `inputDeviceSelection` instead. Deliberately NOT part of
+  `VoiceProfile` (device-dependent, not a "voice" setting); when the manual device is unplugged the
+  UI must show which mic actually took over (orange caption in `devicesCard`).
 
 ## Voice polish chain (Tier 2)
 - `VoiceChain` (Core/AudioProcessing) runs AFTER `DeepFilterNetDSP` on the time-domain output, inside `AudioModel`'s render callback, only when `isAIEnabled`. Order: high-pass → low-shelf → high-shelf → **presence (peaking bell) → de-esser → de-plosive → de-click** → compressor → limiter. The Limiter is last and hard-clamps to the ceiling — it is the final overflow guard.
@@ -306,6 +318,16 @@ Do not add entitlements beyond these two without a measured, documented need.
 - **`LoudnessMeter` (Core/AudioProcessing)** owns all BS.1770 math (the REAL K-weighting biquads — published 48 kHz coefficients via `Biquad.setCoefficients`, NOT RBJ approximations — momentary + gated-integrated LUFS, sample-peak, and the `normalizationGain` helper) as a pure, headless-tested value type — same rule as `Biquad`/`resolveOutputBin`. Tested at multiple frequencies.
 - **v1 is sample-peak, not true-peak** (oversampled dBTP deferred for perf). Do not relabel the peak as dBTP. Integrated LUFS uses a **fixed-size, pre-allocated block ring** (write by index, wraparound) — never an `append`-growing log; `process` stays allocation-free.
 - **Loudness normalization** is a main-computed, slew-limited scalar `loudnessGain` applied pre-limiter in `VoiceChain` (limiter guards the boost). Persisted: `mv.loudnessNorm`, `mv.loudnessTarget`. OFF by default → default output unchanged. `VoiceChain` activates for `loudnessActive` even when polish/clarity are off (limiter must run); the `loudnessActive` field and `AudioModel.applyVoiceChain()` move together (one contract).
+- **Receive-cleanup mini meter is PULL-based, last-value telemetry** (deliberate second pattern next
+  to the `t*` read-and-reset): each cleanup engine stores its post-mix RMS into a heap `levelBox`
+  (raw-pointer captured, allocation-free) plus its own `dsp.aiActivity`, and `runControlPump` PULLS
+  `telemetryLevel`/`telemetryActivity` from whichever engine is non-nil (they're mutually exclusive)
+  into `MeterSnapshot.incomingCleanup{Level,Activity}` — 0 when both are nil, so the meter decays
+  when the feature is off/failed. No read-and-reset (no reset-ownership problem), no new `@Published`
+  on `AudioModel`. The ONLY observer of the two `MeterModel` fields is the `IncomingActivityMeter`
+  subview, shown only while the selected mode's status is `.cleaning`. The Speaker engine's silence
+  bypass decays `aiActivity` itself (it skips `dsp.process`, the only other updater) so the AI bar
+  can't freeze on a stale value.
 
 ## Input Volume & Smart Level (hot-mic guard)
 - **Input Volume** is an app-level pre-DSP trim (`inputVolumeValue`, persisted `mv.inputVolume`, range 25%…100%, default 80%). Applied in `captureOutput(...)` after 48 kHz conversion and **before** `ringBuffer.write`. Does **not** write macOS hardware input volume.
