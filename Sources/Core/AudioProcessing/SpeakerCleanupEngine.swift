@@ -68,6 +68,11 @@ public final class SpeakerCleanupEngine {
     private static let silenceRMSThreshold: Float = 0.0008     // ≈ -62 dBFS
     private static let silenceHoldBuffers: Int32 = 40           // consecutive quiet renders before bypass
 
+    // Lock-free level telemetry for the popover mini meter (see `telemetryLevel` below). Boxed on
+    // the heap like `silenceRunCountBox` so the render closure captures a raw pointer instead of
+    // `self` — zero ARC calls in the render path, matching the project's real-time rule.
+    private let levelBox: UnsafeMutablePointer<Float>
+
     // Default-output follow.
     private var defaultOutputListener: AudioObjectPropertyListenerBlock?
     private var configObserver: NSObjectProtocol?
@@ -90,12 +95,15 @@ public final class SpeakerCleanupEngine {
         monoScratch.initialize(repeating: 0, count: monoScratchCapacity)
         silenceRunCountBox = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
         silenceRunCountBox.pointee = 0
+        levelBox = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        levelBox.initialize(to: 0)
 
         // Consumer (render thread): drain → (maybe bypass) → DFN → play. Captures RAW pointers (ring's
         // C struct, the silence counter box) and the DSP — no ARC/dispatch calls on `self`.
         let ringPtr = ring.cRing
         let dspRef = dsp
         let silenceCountPtr = silenceRunCountBox
+        let levelPtr = levelBox
         let threshold = SpeakerCleanupEngine.silenceRMSThreshold
         let holdBuffers = SpeakerCleanupEngine.silenceHoldBuffers
         sourceNode = AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
@@ -108,6 +116,7 @@ public final class SpeakerCleanupEngine {
             if available > latencyTarget + count { tap_ring_drop(ringPtr, UInt32(available - latencyTarget)) }
             if tap_ring_read(ringPtr, data, UInt32(count)) == 0 {
                 data.update(repeating: 0, count: count)   // underflow → silence (allocation-free)
+                levelPtr.pointee = 0
                 return noErr
             }
             // Sustained near-silence → skip the CoreML call entirely (buffer is already near-zero,
@@ -115,6 +124,7 @@ public final class SpeakerCleanupEngine {
             // signal comes back above threshold.
             var rms: Float = 0
             vDSP_rmsqv(data, 1, &rms, vDSP_Length(count))
+            levelPtr.pointee = rms
             if rms < threshold {
                 if silenceCountPtr.pointee < Int32.max { silenceCountPtr.pointee += 1 }
                 if silenceCountPtr.pointee > holdBuffers {
@@ -133,7 +143,14 @@ public final class SpeakerCleanupEngine {
         monoScratch.deinitialize(count: monoScratchCapacity)
         monoScratch.deallocate()
         silenceRunCountBox.deallocate()
+        levelBox.deallocate()
     }
+
+    /// Lock-free telemetry for the popover mini meter — written by the render thread as plain
+    /// 32-bit stores (same blessed pattern as `DeepFilterNetDSP.aiActivity`), read from main by
+    /// `AudioModel`'s control pump. Last-value store, never read-and-reset.
+    public var telemetryLevel: Float { levelBox.pointee }
+    public var telemetryActivity: Float { dsp.aiActivity }
 
     // MARK: - Lifecycle
 

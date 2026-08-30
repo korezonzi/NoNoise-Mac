@@ -47,6 +47,11 @@ public final class IncomingCleanupEngine {
     private let monoScratchCapacity = 8192
     private let monoScratch: UnsafeMutablePointer<Float>
 
+    // Lock-free level telemetry for the popover mini meter (see `telemetryLevel` below). Boxed on
+    // the heap like `monoScratch` so the render closure captures a raw pointer instead of `self` —
+    // zero ARC calls in the render path, matching the project's real-time rule.
+    private let levelBox: UnsafeMutablePointer<Float>
+
     // Default-output follow.
     private var defaultOutputListener: AudioObjectPropertyListenerBlock?
     private var configObserver: NSObjectProtocol?
@@ -68,11 +73,14 @@ public final class IncomingCleanupEngine {
     public init() {
         monoScratch = UnsafeMutablePointer<Float>.allocate(capacity: monoScratchCapacity)
         monoScratch.initialize(repeating: 0, count: monoScratchCapacity)
+        levelBox = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        levelBox.initialize(to: 0)
 
         // Consumer (render thread): drain → DFN → play. Captures RAW pointers (ring's C struct) and
         // the DSP, so the render path makes no ARC/dispatch calls on `self`.
         let ringPtr = ring.cRing
         let dspRef = dsp
+        let levelPtr = levelBox
         sourceNode = AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
             guard let data = abl[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
@@ -83,8 +91,12 @@ public final class IncomingCleanupEngine {
             if available > latencyTarget + count { tap_ring_drop(ringPtr, UInt32(available - latencyTarget)) }
             if tap_ring_read(ringPtr, data, UInt32(count)) == 0 {
                 data.update(repeating: 0, count: count)   // underflow → silence (allocation-free)
+                levelPtr.pointee = 0
                 return noErr
             }
+            var rms: Float = 0
+            vDSP_rmsqv(data, 1, &rms, vDSP_Length(count))
+            levelPtr.pointee = rms
             dspRef.process(input: data, count: count, output: data)
             return noErr
         }
@@ -94,7 +106,14 @@ public final class IncomingCleanupEngine {
         stop()
         monoScratch.deinitialize(count: monoScratchCapacity)
         monoScratch.deallocate()
+        levelBox.deallocate()
     }
+
+    /// Lock-free telemetry for the popover mini meter — written by the render thread as plain
+    /// 32-bit stores (same blessed pattern as `DeepFilterNetDSP.aiActivity`), read from main by
+    /// `AudioModel`'s control pump. Last-value store, never read-and-reset.
+    public var telemetryLevel: Float { levelBox.pointee }
+    public var telemetryActivity: Float { dsp.aiActivity }
 
     // MARK: - Lifecycle
 

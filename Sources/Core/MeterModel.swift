@@ -39,6 +39,10 @@ public final class MeterModel: ObservableObject {
     @Published public var isSourceMicClipping: Bool = false
     /// Smart Level status message (nil when inactive / cleared).
     @Published public var smartLevelMessage: String?
+    /// Receive-cleanup RMS level (0…~1) — whichever of Speaker Cleanup / Incoming Cleanup is active.
+    @Published public var incomingCleanupLevel: Float = 0
+    /// Receive-cleanup smoothed AI-activity signal (0…1) — mirrors `aiActivity` for the receive side.
+    @Published public var incomingCleanupActivity: Float = 0
 
     public init() {}
 
@@ -57,6 +61,8 @@ public final class MeterModel: ObservableObject {
         isOutputClipping = s.isOutputClipping
         isSourceMicClipping = s.isSourceMicClipping
         smartLevelMessage = s.smartLevelMessage
+        incomingCleanupLevel = s.incomingCleanupLevel
+        incomingCleanupActivity = s.incomingCleanupActivity
     }
 }
 
@@ -79,4 +85,6 @@ struct MeterSnapshot {
     var isOutputClipping: Bool = false
     var isSourceMicClipping: Bool = false
     var smartLevelMessage: String?
+    var incomingCleanupLevel: Float = 0
+    var incomingCleanupActivity: Float = 0
 }

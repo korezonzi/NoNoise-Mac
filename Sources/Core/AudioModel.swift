@@ -1437,6 +1437,21 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         meterSnapshot.momentaryLUFS = tMomentaryLUFS
         meterSnapshot.integratedLUFS = tIntegratedLUFS
 
+        // Receive-cleanup mini meter — the two engines are mutually exclusive (at most one non-nil).
+        // Plain-scalar reads of render-thread stores; both read as 0 when the feature is off/failed
+        // because the owner releases the engine to nil on every non-.cleaning path.
+        var rxLevel: Float = 0
+        var rxActivity: Float = 0
+        if let spk = speakerEngine {
+            rxLevel = spk.telemetryLevel
+            rxActivity = spk.telemetryActivity
+        } else if #available(macOS 14.4, *), let inc = incomingEngine as? IncomingCleanupEngine {
+            rxLevel = inc.telemetryLevel
+            rxActivity = inc.telemetryActivity
+        }
+        meterSnapshot.incomingCleanupLevel = rxLevel
+        meterSnapshot.incomingCleanupActivity = rxActivity
+
         // Loudness normalization control loop — ALWAYS-ON (gated only by the feature flag, never by
         // popover visibility). Slew-limited make-up gain computed on main from the integrated-LUFS
         // snapshot and pushed to the chain (lock-free scalar). When the meter has no measurement
