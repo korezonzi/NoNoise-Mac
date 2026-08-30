@@ -324,18 +324,39 @@ struct ContentView: View {
 
     // MARK: - Devices
 
+    /// The device name actually in effect when `inputDeviceSelection == .auto` — resolves
+    /// `selectedInputDeviceID` (the runtime-resolved capture device) against the current list.
+    private var effectiveInputDeviceName: String {
+        audioModel.inputDevices.first(where: { $0.uniqueID == audioModel.selectedInputDeviceID })?.localizedName ?? "—"
+    }
+
     private var devicesCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                cardLabel("入力", systemImage: "mic.fill")
-                    .frame(width: 74, alignment: .leading)
-                Picker("", selection: $audioModel.selectedInputDeviceID) {
-                    ForEach(audioModel.inputDevices, id: \.uniqueID) { device in
-                        Text(device.localizedName).tag(device.uniqueID)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 10) {
+                    cardLabel("入力", systemImage: "mic.fill")
+                        .frame(width: 74, alignment: .leading)
+                    Picker("", selection: $audioModel.inputDeviceSelection) {
+                        Text("自動（システムデフォルト）").tag(VirtualMicRouting.autoInputSelection)
+                        ForEach(audioModel.inputDevices, id: \.uniqueID) { device in
+                            Text(device.localizedName).tag(device.uniqueID)
+                        }
+                        // Placeholder so a saved-but-currently-unplugged manual selection doesn't
+                        // render as a blank/mismatched picker value.
+                        if audioModel.inputDeviceSelection != VirtualMicRouting.autoInputSelection,
+                           !audioModel.inputDevices.contains(where: { $0.uniqueID == audioModel.inputDeviceSelection }) {
+                            Text("（未接続のデバイス）").tag(audioModel.inputDeviceSelection)
+                        }
                     }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
                 }
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
+                if audioModel.inputDeviceSelection == VirtualMicRouting.autoInputSelection {
+                    Text("いま: \(effectiveInputDeviceName)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 84)
+                }
             }
             HStack(spacing: 10) {
                 cardLabel("出力", systemImage: "speaker.wave.2.fill")
