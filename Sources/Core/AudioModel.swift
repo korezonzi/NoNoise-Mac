@@ -122,6 +122,20 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         mSelector: kAudioHardwarePropertyDevices,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
+    // Default-device flip listeners (NOT default-device following — playback stays pinned to the
+    // hidden engine device). Wired-jack data-source changes and Bluetooth profile switches don't
+    // always fire kAudioHardwarePropertyDevices, so these are an extra "hardware environment moved"
+    // trigger for the same debounced `scheduleDeviceRefresh()`, which force-repins the engine route.
+    private var defaultOutputListener: AudioObjectPropertyListenerBlock?
+    private var defaultOutputAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    private var defaultInputListener: AudioObjectPropertyListenerBlock?
+    private var defaultInputAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
     private var deviceRefreshWorkItem: DispatchWorkItem?
     // Main playback engine's own AVAudioEngineConfigurationChange recovery (Bluetooth HFP profile
     // switches, sample-rate changes, etc. stop `engine` even though it's pinned to a fixed hidden
@@ -451,6 +465,18 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         if let block = hardwareDevicesListener {
             AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
                                                    &hardwareDevicesAddr,
+                                                   DispatchQueue.main,
+                                                   block)
+        }
+        if let block = defaultOutputListener {
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                   &defaultOutputAddr,
+                                                   DispatchQueue.main,
+                                                   block)
+        }
+        if let block = defaultInputListener {
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                                   &defaultInputAddr,
                                                    DispatchQueue.main,
                                                    block)
         }
@@ -1187,6 +1213,29 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
                                             &hardwareDevicesAddr,
                                             DispatchQueue.main,
                                             block)
+
+        // Default output/input device flips are NOT device-list changes (a wired-jack data-source
+        // switch or a Bluetooth profile change can leave kAudioHardwarePropertyDevices untouched),
+        // so they need their own listeners. Both just funnel into the same debounced device refresh
+        // — this is a trigger only; playback stays pinned to the hidden engine device, it does not
+        // follow the new default.
+        let defaultOutputBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleDeviceRefresh()
+        }
+        defaultOutputListener = defaultOutputBlock
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                            &defaultOutputAddr,
+                                            DispatchQueue.main,
+                                            defaultOutputBlock)
+
+        let defaultInputBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleDeviceRefresh()
+        }
+        defaultInputListener = defaultInputBlock
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject),
+                                            &defaultInputAddr,
+                                            DispatchQueue.main,
+                                            defaultInputBlock)
     }
 
     private func scheduleDeviceRefresh() {
