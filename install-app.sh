@@ -54,6 +54,23 @@ else
     NEEDS_SUDO=false
 fi
 
+# Replacing the bundle UNDER a running instance is a suspected trigger for macOS 26's per-bundle-id
+# menu-bar registration poisoning (status item parked off-screen on every later launch — see the
+# header note in Sources/App/NoNoiseMacApp.swift). Quit gracefully first; never force-kill (README:
+# a force-killed app corrupts the virtual driver's shared ring).
+if pgrep -xq "$APP_NAME"; then
+    echo "Quitting running $APP_NAME before replacing the bundle..."
+    osascript -e "tell application \"$TARGET_APP\" to quit" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+        pgrep -xq "$APP_NAME" || break
+        sleep 0.25
+    done
+    if pgrep -xq "$APP_NAME"; then
+        echo "$APP_NAME is still running; quit it manually and re-run install." >&2
+        exit 1
+    fi
+fi
+
 echo "Installing $APP_BUNDLE to $APPLICATIONS_DIR..."
 if [ "$NEEDS_SUDO" = true ]; then
     sudo rm -rf "$TARGET_APP"

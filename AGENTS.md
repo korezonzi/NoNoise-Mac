@@ -164,7 +164,10 @@ Do not add entitlements beyond these two without a measured, documented need.
 
 ## Branding & identifier conventions (do not regress)
 - Display name: **NoNoise Mac**. Code identifier: **NoNoiseMac** (executable, SwiftPM
-  package + targets, class prefix, asset filenames). Bundle id: **com.ivalsaraj.NoNoiseMac**.
+  package + targets, class prefix, asset filenames). Bundle id: **com.korezonzi.NoNoiseMac.r2**
+  (rotated whenever macOS 26's menu-bar management DB poisons the current id — twice so far; see
+  the header note in `Sources/App/NoNoiseMacApp.swift` and the migration chain there). The DRIVER
+  bundle id stays **com.ivalsaraj.NoNoiseMic** (unaffected by the app-side rotations).
   CLI binary: **NoNoiseMacCLI**.
 - The old names **MetalVoice / Ghostkwebb** may appear **only** in credit/provenance:
   `README.md` credits, `LICENSE` original copyright, this provenance note, and `docs/`

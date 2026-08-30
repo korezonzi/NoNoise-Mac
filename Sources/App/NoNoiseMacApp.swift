@@ -13,9 +13,14 @@ import Core
 //      off-screen, permanently occluded, on BOTH displays, immune to isVisible pins, pref-key
 //      resets and ControlCenter restarts.
 // Proof: the identical binary under a fresh bundle id lays out and draws normally (probe test).
-// Fix: this fork's CFBundleIdentifier is `com.korezonzi.NoNoiseMac` (see also the one-shot
-// defaults migration below). The status item stays manually managed via NSStatusItem in the
-// AppDelegate — it works fine under the new id and gives us the right-click menu for free.
+// Fix: rotate CFBundleIdentifier to a fresh id (see also the one-shot defaults migration below).
+// The status item stays manually managed via NSStatusItem in the AppDelegate — it works fine
+// under a fresh id and gives us the right-click menu for free.
+// RECURRENCE (2026-08-30): the same poisoning hit `com.korezonzi.NoNoiseMac` (probe test again
+// confirmed: same binary under a fresh id draws normally) → rotated to
+// `com.korezonzi.NoNoiseMac.r2`. Suspected trigger: `install-app.sh` used to rm/ditto the bundle
+// UNDER a running instance (now it quits the app first); SIGINT-killing a terminal-launched
+// instance is the other candidate. If it recurs, rotate to `.r3` and extend the migration chain.
 // The empty Settings scene below exists only because a SwiftUI `App` must declare a scene.
 @main
 struct NoNoiseMacApp: App {
@@ -42,18 +47,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var iconCancellable: AnyCancellable?
 
-    /// One-shot migration of user settings from the upstream bundle id's defaults domain.
-    /// This fork changed CFBundleIdentifier (com.ivalsaraj.NoNoiseMac → com.korezonzi.NoNoiseMac)
-    /// because macOS 26's menu-bar item management held a poisoned "hidden" registration for the
-    /// old id — the status item's window was created but stayed permanently occluded/parked
-    /// off-screen, on every launch, regardless of isVisible/pref-key/ControlCenter resets. The
-    /// same binary under a fresh id lays out and draws normally (verified with a probe bundle).
-    /// A new id means a new defaults domain, so copy the user's mv.* settings across once.
-    private static func migrateDefaultsFromUpstreamID() {
+    /// One-shot migration of user settings from previously-used bundle ids' defaults domains.
+    /// The bundle id rotates whenever macOS 26's menu-bar item management poisons the current one
+    /// with a "hidden" registration (status item window created but permanently occluded/parked
+    /// off-screen, immune to isVisible/pref-key/ControlCenter resets — see the header note; each
+    /// rotation was verified with a probe bundle). A new id means a new defaults domain, so copy
+    /// the user's mv.* settings across once. Domains are newest-first: only keys not already
+    /// present are copied, so the most recent domain wins. On the next rotation, prepend the
+    /// retired id to the list and bump the marker key.
+    private static func migrateDefaultsFromPreviousIDs() {
         let d = UserDefaults.standard
-        let markerKey = "mv.migratedFromIvalsarajID"
+        let markerKey = "mv.migratedToR2ID"
         guard !d.bool(forKey: markerKey) else { return }
-        if let old = d.persistentDomain(forName: "com.ivalsaraj.NoNoiseMac") {
+        for domain in ["com.korezonzi.NoNoiseMac", "com.ivalsaraj.NoNoiseMac"] {
+            guard let old = d.persistentDomain(forName: domain) else { continue }
             for (key, value) in old where key.hasPrefix("mv.") && d.object(forKey: key) == nil {
                 d.set(value, forKey: key)
             }
@@ -63,7 +70,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        Self.migrateDefaultsFromUpstreamID()   // BEFORE AudioModel() — its init reads UserDefaults
+        Self.migrateDefaultsFromPreviousIDs()   // BEFORE AudioModel() — its init reads UserDefaults
 
         let model = AudioModel()
         audioModel = model

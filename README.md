@@ -228,7 +228,7 @@ Driver/tests/run-tests.sh            # ドライバCコードのホストテス�
 |---|---|
 | NoNoise Speaker（仮想出力）と `SpeakerCleanupEngine` を追加 | 受信ノイズ除去を「通話アプリだけ」に限定するため。従来のprocess tap方式は音楽まで加工していた |
 | メニューバーをNSStatusItem直接管理に変更 | macOS 26でMenuBarExtraがシステムに終了させられ、起動3秒で落ちる問題を回避 |
-| bundle idを `com.korezonzi.NoNoiseMac` に変更 | macOS側のステータスアイテム座標のautosave状態が壊れ、アイコンが画面外に配置されて見えなくなる問題の回避 |
+| bundle idを `com.korezonzi.NoNoiseMac.r2` に変更（2回目のローテーション） | macOS側のメニューバー管理DBがbundle id単位で「非表示」状態を保持し続け、アイコンが二度と表示されなくなる問題の回避。`com.ivalsaraj`→`com.korezonzi`→`.r2` と再発のたびにIDを替え、設定は自動引き継ぎ |
 | プリセットを 自動/強/中/弱/カスタム に再設計 | 旧名（Meeting/Podcast/Tutorial）では何が変わるのか判別できなかった。あわせて環境追従の自動強度制御を追加 |
 | UIを日本語化 | チーム配布のため。技術用語（LUFS・dBFS等）は原語のまま |
 | Sparkle自動更新を除去 | SPMのバイナリ取得ハング回避 + git更新のため不要 |
