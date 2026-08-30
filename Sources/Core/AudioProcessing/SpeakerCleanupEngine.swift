@@ -128,6 +128,10 @@ public final class SpeakerCleanupEngine {
             if rms < threshold {
                 if silenceCountPtr.pointee < Int32.max { silenceCountPtr.pointee += 1 }
                 if silenceCountPtr.pointee > holdBuffers {
+                    // Bypass skips dsp.process(), which is the only place aiActivity updates —
+                    // decay it here so the popover's AI bar doesn't freeze on a stale value
+                    // while the incoming audio is silent (same rationale as DFN's own decay).
+                    dspRef.aiActivity *= 0.85
                     return noErr
                 }
             } else {
@@ -143,6 +147,7 @@ public final class SpeakerCleanupEngine {
         monoScratch.deinitialize(count: monoScratchCapacity)
         monoScratch.deallocate()
         silenceRunCountBox.deallocate()
+        levelBox.deinitialize(count: 1)
         levelBox.deallocate()
     }
 

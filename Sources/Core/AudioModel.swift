@@ -1119,36 +1119,54 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         }
     }
     
-    func checkPermissions() {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: permissionStatus = "Authorized"
-        case .denied: permissionStatus = "Denied"
-        case .restricted: permissionStatus = "Restricted"
-        case .notDetermined:
-            permissionStatus = "Not Determined"
-            AVCaptureDevice.requestAccess(for: .audio) { g in
-                DispatchQueue.main.async { self.permissionStatus = g ? "Authorized" : "Denied" }
+    /// Mic-permission state as a typed value — the single source for capture-blocking logic.
+    /// `permissionStatus` (the legacy display string) is DERIVED from this in `micPermission.didSet`;
+    /// never compare the string (a future localization of it must not silently break the warning row).
+    enum MicPermission {
+        case authorized, denied, restricted, notDetermined, unknown
+        var blocksCapture: Bool { self == .denied || self == .restricted }
+        var displayName: String {
+            switch self {
+            case .authorized: return "Authorized"
+            case .denied: return "Denied"
+            case .restricted: return "Restricted"
+            case .notDetermined: return "Not Determined"
+            case .unknown: return "Unknown"
             }
-        @unknown default: permissionStatus = "Unknown"
+        }
+    }
+
+    private var micPermission: MicPermission = .unknown {
+        didSet { permissionStatus = micPermission.displayName }
+    }
+
+    private static func currentMicPermission() -> MicPermission {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return .authorized
+        case .denied: return .denied
+        case .restricted: return .restricted
+        case .notDetermined: return .notDetermined
+        @unknown default: return .unknown
+        }
+    }
+
+    func checkPermissions() {
+        micPermission = Self.currentMicPermission()
+        if micPermission == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { g in
+                DispatchQueue.main.async { self.micPermission = g ? .authorized : .denied }
+            }
         }
     }
 
     /// Read-only permission re-check — never triggers the system prompt (unlike checkPermissions(),
     /// which requests access on .notDetermined), so it is safe to call on every popover open.
     public func refreshMicPermissionStatus() {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: permissionStatus = "Authorized"
-        case .denied: permissionStatus = "Denied"
-        case .restricted: permissionStatus = "Restricted"
-        case .notDetermined: permissionStatus = "Not Determined"
-        @unknown default: permissionStatus = "Unknown"
-        }
+        micPermission = Self.currentMicPermission()
     }
 
     /// True when the mic permission is known to block capture — drives the popover's warning row.
-    public var isMicPermissionBlocked: Bool {
-        permissionStatus == "Denied" || permissionStatus == "Restricted"
-    }
+    public var isMicPermissionBlocked: Bool { micPermission.blocksCapture }
 
     func fetchInputDevices() {
         // AVCaptureDeviceDiscovery

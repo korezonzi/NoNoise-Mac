@@ -64,7 +64,11 @@ case .live(let input, let output, let gain):
 
     if let inDev = model.inputDevices.first(where: { $0.localizedName.localizedCaseInsensitiveContains(input) }) {
         print("Selecting Input: \(inDev.localizedName)")
-        model.selectedInputDeviceID = inDev.uniqueID
+        // Manual selection, NOT a direct selectedInputDeviceID write: a direct write is discarded
+        // by the next fetchInputDevices() → applyInputSelection() pass (auto mode re-resolves to
+        // the system default on every device change). The CLI runs in its own defaults domain,
+        // so the didSet's persistence is inert for the app.
+        model.inputDeviceSelection = inDev.uniqueID
     } else {
         print("Error: Input device '\(input)' not found.")
         exit(1)

@@ -266,4 +266,23 @@ final class VirtualMicRoutingTests: XCTestCase {
             current: "a-uid"
         ))
     }
+
+    func testInputSelectionManualEmptyListReturnsNil() {
+        XCTAssertNil(VirtualMicRouting.resolveInputDeviceUID(
+            selection: "saved-uid",
+            available: [],
+            defaultUID: "b-uid",
+            current: "a-uid"
+        ))
+    }
+
+    func testInputSelectionManualFallsThroughDefaultToCurrent() {
+        // Manual chain exercised end-to-end: saved missing → default missing → current survives.
+        XCTAssertEqual(VirtualMicRouting.resolveInputDeviceUID(
+            selection: "saved-uid",
+            available: ["a-uid", "b-uid"],
+            defaultUID: "gone-default-uid",
+            current: "b-uid"
+        ), "b-uid")
+    }
 }

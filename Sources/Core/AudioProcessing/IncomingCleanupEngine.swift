@@ -106,6 +106,7 @@ public final class IncomingCleanupEngine {
         stop()
         monoScratch.deinitialize(count: monoScratchCapacity)
         monoScratch.deallocate()
+        levelBox.deinitialize(count: 1)
         levelBox.deallocate()
     }
 

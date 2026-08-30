@@ -356,6 +356,13 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .padding(.leading, 84)
+                } else if audioModel.inputDeviceSelection != audioModel.selectedInputDeviceID {
+                    // Manual pick is unplugged and the resolver fell back to another mic — the user
+                    // must SEE which device is actually feeding the call, not a silent substitution.
+                    Text("選択したデバイスが見つかりません。いま: \(effectiveInputDeviceName)")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .padding(.leading, 84)
                 }
             }
             HStack(spacing: 10) {
