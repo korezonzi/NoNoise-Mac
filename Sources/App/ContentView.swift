@@ -227,6 +227,10 @@ struct ContentView: View {
                     .font(.caption2).foregroundColor(.secondary)
             }
 
+            if isCleanIncomingCleaning {
+                IncomingActivityMeter(meter: audioModel.meterModel)
+            }
+
             // Setup-forgot guard: the driver/tap alone can't clean anything for the speaker path
             // until the user also flips their call app's own output device — surface a nudge for
             // as long as we're genuinely running so it isn't missed after the toggle is flipped.
@@ -275,6 +279,15 @@ struct ContentView: View {
             case .cleaning:    return "すべての受信音声をクリア中"
             case .failed:      return "開始できませんでした — システム設定 ▸ プライバシーとセキュリティで音声キャプチャを許可してください"
             }
+        }
+    }
+
+    /// True while the selected mode's backend is genuinely running — gates the live activity meter
+    /// (`IncomingActivityMeter`) the same way `cleanIncomingStatusCaption`'s `.cleaning` case does.
+    private var isCleanIncomingCleaning: Bool {
+        switch cleanIncomingMode {
+        case .speaker:   return audioModel.speakerCleanupStatus == .cleaning
+        case .allSystem: return audioModel.incomingCleanupStatus == .cleaning
         }
     }
 
@@ -465,6 +478,32 @@ private struct StatusMeters: View {
                         Text(msg).font(.caption2).foregroundColor(.secondary)
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Live activity meter for the "Clean incoming" card — the only visible sign the receive-side
+/// cleanup pipeline (Speaker Cleanup or Incoming Cleanup, whichever is active) is doing something.
+/// Observes `MeterModel` only (not `AudioModel`), matching `StatusMeters`/`LiveHUDCard`'s isolation.
+private struct IncomingActivityMeter: View {
+    @ObservedObject var meter: MeterModel
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                MeterView(level: meter.incomingCleanupLevel)
+                    .frame(height: 6)
+            }
+            HStack(spacing: 8) {
+                Text("AI").font(.caption2).foregroundColor(.secondary)
+                // Same convention as LiveHUDCard: MeterView scales level ×5 internally, and
+                // aiActivity-style signals are already 0…1, so divide by 5 to avoid a 5× over-scale.
+                MeterView(level: meter.incomingCleanupActivity / 5)
+                    .frame(height: 6)
             }
         }
     }
