@@ -2,6 +2,19 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-09-01 — Built-in-speaker echo warning + DIAG logging replaced with os.Logger
+- **What:** Field-confirmed the mic fix (voice reaches the far side through a real Meet call with
+  Bluetooth earphones), then diagnosed the reported echo/howling: receive cleanup playing through
+  the BUILT-IN SPEAKER defeats the call app's own echo canceller (see the 2026-09-01 knowledge
+  entry). Added `AudioModel.defaultOutputIsBuiltInSpeaker` (transport 'bltn' + data source 'ispk',
+  pure predicate `VirtualMicRouting.isBuiltInSpeakerOutput`, headless-tested) and an orange
+  echo-guard caption in the incoming card while cleaning. Also completed the planned cleanup:
+  the temporary DIAG stderr logging (330280c) is now `os.Logger` (subsystem = bundle id,
+  category "Route") — queryable via `log stream` after the fact.
+- **Root fix direction:** Apple Voice Processing I/O for the capture path (OS-level AEC) is the
+  planned structural fix so speakers work too — separate feasibility spike before any change to
+  the shipping pipeline.
+
 ### 2026-08-30 — Bundle id rotated to `com.korezonzi.NoNoiseMac.r2` (menu-bar poisoning recurred)
 - **What:** The macOS 26 menu-bar registration poisoning (first seen on `com.ivalsaraj.NoNoiseMac`)
   recurred on `com.korezonzi.NoNoiseMac` — icon gone, app healthy, probe bundle under a fresh id

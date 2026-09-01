@@ -5,6 +5,31 @@ for the must-read failure modes.
 
 ---
 
+### [GOTCHA] 2026-09-01 — Receive cleanup on the built-in speaker defeats the call app's echo canceller (echo/howling)
+- **Symptom** (field report, Meet group call, no earphones): the far side hears themselves back,
+  the user hears faint howling, and other participants' mic-activity marks flicker.
+- **Root cause**: with the call app's speaker set to "NoNoise Speaker", the app's own AEC uses
+  what IT plays to that (virtual) device as the cancellation reference — but the audible playback
+  happens later, through our re-render (ring + DFN latency) on a DIFFERENT device (the system
+  default output). On the built-in speaker, the built-in mic hears that delayed playback, the call
+  app can't correlate it with its reference, and the echo passes straight through NoNoise Mic into
+  the call. This is a STRUCTURAL property of the re-render approach, not a bug: any app-side AEC
+  is defeated by the inserted latency + device split.
+- **Rule**: with earphones (any kind) there is no acoustic loop — full pipeline is safe. On
+  speakers, either turn receive cleanup OFF (call app outputs to the real speaker; its AEC works
+  again) or use earphones. The UI warns while the hazardous combination is live:
+  `AudioModel.defaultOutputIsBuiltInSpeaker` (transport 'bltn' + data source 'ispk' — combo-jack
+  wired headphones report 'hdpn' and are excluded; the pure predicate is
+  `VirtualMicRouting.isBuiltInSpeakerOutput`, headless-tested).
+- **Root fix direction (planned, not yet built)**: move the mic capture path onto Apple's Voice
+  Processing I/O (`AVAudioEngine.inputNode.isVoiceProcessingEnabled` / AUVoiceIO) and play the
+  receive-cleanup output through the paired output unit, so the OS-level AEC cancels our own
+  playback from our own capture (the Krisp approach). That is a capture-path re-architecture —
+  needs its own feasibility spike + plan before touching the shipping pipeline.
+- **Files**: `Sources/Core/AudioModel.swift` (`refreshDefaultOutputTransport`),
+  `Sources/Core/AudioProcessing/VirtualMicRouting.swift` (`isBuiltInSpeakerOutput`),
+  `Sources/App/ContentView.swift` (echo-guard caption in the incoming card).
+
 ### [GOTCHA] 2026-08-30 — macOS 26 menu-bar registration poisoning RECURS; escape by rotating the bundle id (now `.r2`)
 - **Problem**: The menu-bar icon vanished again — app process healthy, engine running, but no
   status item. Same failure mode previously documented only in `Sources/App/NoNoiseMacApp.swift`'s
