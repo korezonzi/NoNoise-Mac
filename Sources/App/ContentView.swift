@@ -242,6 +242,15 @@ struct ContentView: View {
                 Text("通話アプリのスピーカーに「NoNoise Speaker」を選ぶのを忘れずに")
                     .font(.caption2).foregroundColor(.orange)
             }
+
+            // Echo guard: while cleaning, the re-render goes to the system default output. If that
+            // is the built-in SPEAKER, the built-in mic hears it and the call app's own echo
+            // canceller can't remove it across our added latency — the far side hears themselves.
+            // Warn while the hazardous combination is live (both backends re-render the same way).
+            if isCleanIncomingCleaning, audioModel.defaultOutputIsBuiltInSpeaker {
+                Text("内蔵スピーカーで再生中 — 相手にエコーが返る原因になります。イヤホンの使用を推奨（スピーカーで話すときはこの機能をオフに）")
+                    .font(.caption2).foregroundColor(.orange)
+            }
         }
         .nnCard()
         .onAppear { syncCleanIncomingModeToActiveBackend() }

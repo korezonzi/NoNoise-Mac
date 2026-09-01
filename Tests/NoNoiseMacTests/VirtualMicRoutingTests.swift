@@ -285,4 +285,39 @@ final class VirtualMicRoutingTests: XCTestCase {
             current: "b-uid"
         ), "b-uid")
     }
+
+    // MARK: - Built-in-speaker echo warning predicate
+
+    func testBuiltInSpeakerOutputDetected() {
+        XCTAssertTrue(VirtualMicRouting.isBuiltInSpeakerOutput(
+            transport: VirtualMicRouting.builtInTransportType,
+            dataSource: VirtualMicRouting.builtInSpeakerDataSource))
+    }
+
+    func testCombJackHeadphonesAreNotSpeaker() {
+        // Wired headphones share the built-in transport but report data source 'hdpn'.
+        XCTAssertFalse(VirtualMicRouting.isBuiltInSpeakerOutput(
+            transport: VirtualMicRouting.builtInTransportType,
+            dataSource: 0x6864_706E)) // 'hdpn'
+    }
+
+    func testNonBuiltInTransportIsNeverSpeaker() {
+        // Bluetooth ('blue') — earphones AND BT speakers alike: no warning (can't distinguish).
+        XCTAssertFalse(VirtualMicRouting.isBuiltInSpeakerOutput(
+            transport: 0x626C_7565,
+            dataSource: nil))
+    }
+
+    func testUnreadableDataSourceOnBuiltInAssumesSpeaker() {
+        // Warn-safe default: built-in transport with no readable data source counts as speaker.
+        XCTAssertTrue(VirtualMicRouting.isBuiltInSpeakerOutput(
+            transport: VirtualMicRouting.builtInTransportType,
+            dataSource: nil))
+    }
+
+    func testBuiltInFourCCLiterals() {
+        // Guard the hand-typed fourCCs (this file is CoreAudio-import-free by design).
+        XCTAssertEqual(VirtualMicRouting.builtInTransportType, 0x626C_746E)      // 'bltn'
+        XCTAssertEqual(VirtualMicRouting.builtInSpeakerDataSource, 0x6973_706B)  // 'ispk'
+    }
 }

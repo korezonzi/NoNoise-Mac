@@ -141,4 +141,25 @@ public enum VirtualMicRouting {
     public static func filterInputs(_ names: [String]) -> [String] {
         names.filter { $0 != visibleDeviceName && $0 != engineDeviceName && $0 != speakerTapDeviceName }
     }
+
+    // MARK: - Built-in-speaker echo warning
+
+    /// FourCC literals mirrored here because this file stays CoreAudio-import-free (pure/testable):
+    /// `kAudioDeviceTransportTypeBuiltIn` ('bltn') and the built-in output's Internal Speaker data
+    /// source ('ispk'). Same convention as the driver-contract literals above — a typo fails a test,
+    /// not silently at runtime.
+    public static let builtInTransportType: UInt32 = 0x626C_746E   // 'bltn'
+    public static let builtInSpeakerDataSource: UInt32 = 0x6973_706B   // 'ispk'
+
+    /// True when the system default output is the BUILT-IN SPEAKER — the one case where the
+    /// receive-cleanup re-render acoustically couples into the built-in mic and the call app's own
+    /// echo canceller cannot remove it across our added latency (the UI warns exactly then).
+    /// Wired headphones on the combo jack share the built-in transport but report data source
+    /// 'hdpn', so the data source (when readable) is what separates speaker from headphones;
+    /// an unreadable data source on a built-in transport assumes speaker (warn-safe).
+    public static func isBuiltInSpeakerOutput(transport: UInt32, dataSource: UInt32?) -> Bool {
+        guard transport == builtInTransportType else { return false }
+        guard let ds = dataSource else { return true }
+        return ds == builtInSpeakerDataSource
+    }
 }

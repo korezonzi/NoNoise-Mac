@@ -5,8 +5,16 @@ import Combine
 import AudioToolbox
 import CoreAudio
 import Accelerate
+import os
 
 public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    /// Route/lifecycle diagnostics — the permanent replacement for the temporary DIAG stderr
+    /// logging (330280c). Queryable after the fact via
+    /// `log stream --predicate 'subsystem == "com.korezonzi.NoNoiseMac.r2"'`. Every call site is
+    /// low-frequency and event-driven (main thread, plus one first-sample marker on the capture
+    /// queue) — NEVER log from the render thread.
+    static let routeLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "NoNoiseMacCLI",
+                                 category: "Route")
     // Published State for UI.
     // Defaults ON so NoNoise Mac is actively cancelling noise on first launch.
     @Published public var isAIEnabled: Bool = true {
@@ -47,6 +55,13 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     /// True when the visible "NoNoise Mic" virtual device is installed (resolved by UID, so it
     /// works even though that device is INPUT-only and absent from the output-scoped scan).
     @Published public var driverInstalled: Bool = false
+
+    /// True while the system default output is the built-in speaker — the receive-cleanup engines
+    /// re-render to the default output, and built-in-speaker playback feeds the built-in mic in a
+    /// loop the call app's own echo canceller can't break across our added latency, so the UI
+    /// warns while cleaning. Low-frequency: recomputed only on device refreshes (default-output
+    /// flips route through the existing listeners), never from the pump.
+    @Published public private(set) var defaultOutputIsBuiltInSpeaker: Bool = false
 
     /// True while some app is actually capturing from "NoNoise Mic". In on-demand mode the real
     /// mic (and the macOS orange mic indicator) is only held while this is true — matching Krisp,
@@ -461,6 +476,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         setupCaptureSession()
         setupPlaybackEngine()
         resolveVirtualMicLifecycle()   // arm the in-use listener + sync initial state
+        refreshDefaultOutputTransport()
         installHardwareDeviceListener()
         installEngineConfigurationChangeObserver()
         loadSettings()
@@ -1045,7 +1061,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         }
 
         let routeUID = VirtualMicRouting.preferredOutputUID(from: allDevs)   // engine (by UID), else BlackHole, else nil
-        FileHandle.standardError.write(Data("DIAG: fetchOutputDevices routeUID=\(routeUID ?? "nil") engineRouteID=\(engineRouteID)\n".utf8))
+        Self.routeLog.info("fetchOutputDevices routeUID=\(routeUID ?? "nil", privacy: .public) engineRouteID=\(engineRouteID, privacy: .public)")
         DispatchQueue.main.async {
             self.outputDevices = newDevs
             // The visible "NoNoise Mic" is INPUT-only, so it is NOT in the output-scoped allDevs.
@@ -1112,10 +1128,9 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             // comes while the engine stays stopped.
             consecutivePlaybackRestartFailures = 0
             if errorMessage != nil { errorMessage = nil }
-            FileHandle.standardError.write(Data("DIAG: engine started, out=\(selectedOutputDeviceID)\n".utf8))
+            Self.routeLog.info("engine started, out=\(self.selectedOutputDeviceID, privacy: .public)")
         } catch {
-            print("Engine Error: \(error)")
-            FileHandle.standardError.write(Data("DIAG: engine start FAILED: \(error)\n".utf8))
+            Self.routeLog.error("engine start FAILED: \(error.localizedDescription, privacy: .public)")
         }
     }
     
@@ -1257,7 +1272,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             isRunningSomewhereListener = nil
         }
         micDeviceID = deviceID(forUID: VirtualMicRouting.visibleDeviceUID)
-        FileHandle.standardError.write(Data("DIAG: resolveVirtualMicLifecycle micDeviceID=\(micDeviceID) onDemand=\(onDemandMode)\n".utf8))
+        Self.routeLog.info("resolveVirtualMicLifecycle micDeviceID=\(self.micDeviceID, privacy: .public) onDemand=\(self.onDemandMode, privacy: .public)")
         guard onDemandMode else {
             virtualMicInUse = false
             if wasOnDemandMode { startCapture() }
@@ -1279,7 +1294,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         var addr = isRunningSomewhereAddr
         AudioObjectGetPropertyData(micDeviceID, &addr, 0, nil, &size, &val)
         let inUse = val != 0
-        FileHandle.standardError.write(Data("DIAG: refreshVirtualMicUsage inUse=\(inUse)\n".utf8))
+        Self.routeLog.info("refreshVirtualMicUsage inUse=\(inUse, privacy: .public)")
         virtualMicInUse = inUse
         if inUse { startCapture() } else { stopCapture() }
     }
@@ -1339,10 +1354,43 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         fetchInputDevices()
         fetchOutputDevices(forceRepin: forceRepin)
         resolveVirtualMicLifecycle()
+        refreshDefaultOutputTransport()
         // The incoming tap engine is NOT re-applied here: it captures all-system-minus-NoNoise (so
         // device add/remove doesn't change its source) and follows the default output via its own
         // HAL listener + AVAudioEngineConfigurationChange observer. Re-applying would needlessly
         // rebuild the tap on every hardware change.
+    }
+
+    /// Re-reads the system default output's transport + data source into
+    /// `defaultOutputIsBuiltInSpeaker` (pure decision: `VirtualMicRouting.isBuiltInSpeakerOutput`).
+    /// Main-thread, called from init and every debounced device refresh.
+    private func refreshDefaultOutputTransport() {
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        var dev = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev)
+        var isSpeaker = false
+        if dev != 0 {
+            var taddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                                   mScope: kAudioObjectPropertyScopeGlobal,
+                                                   mElement: kAudioObjectPropertyElementMain)
+            var transport: UInt32 = 0
+            var tsize = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(dev, &taddr, 0, nil, &tsize, &transport) == noErr {
+                var daddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDataSource,
+                                                       mScope: kAudioDevicePropertyScopeOutput,
+                                                       mElement: kAudioObjectPropertyElementMain)
+                var dataSource: UInt32 = 0
+                var dsize = UInt32(MemoryLayout<UInt32>.size)
+                let dsStatus = AudioObjectGetPropertyData(dev, &daddr, 0, nil, &dsize, &dataSource)
+                isSpeaker = VirtualMicRouting.isBuiltInSpeakerOutput(
+                    transport: transport,
+                    dataSource: dsStatus == noErr ? dataSource : nil)
+            }
+        }
+        if defaultOutputIsBuiltInSpeaker != isSpeaker { defaultOutputIsBuiltInSpeaker = isSpeaker }
     }
 
     /// Observes `.AVAudioEngineConfigurationChange` on the MAIN playback `engine` (pinned to the
@@ -1391,7 +1439,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         let action = VirtualMicRouting.playbackRestartAction(
             engineRunning: engine.isRunning,
             consecutiveFailures: consecutivePlaybackRestartFailures)
-        FileHandle.standardError.write(Data("DIAG: engineConfigChange action=\(action) running=\(engine.isRunning) failures=\(consecutivePlaybackRestartFailures)\n".utf8))
+        Self.routeLog.info("engineConfigChange action=\(String(describing: action), privacy: .public) running=\(self.engine.isRunning, privacy: .public) failures=\(self.consecutivePlaybackRestartFailures, privacy: .public)")
         switch action {
         case .skip:
             consecutivePlaybackRestartFailures = 0
@@ -1414,13 +1462,13 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     }
 
     private func startCapture() {
-        FileHandle.standardError.write(Data("DIAG: startCapture (isRunning=\(captureSession.isRunning))\n".utf8))
+        Self.routeLog.info("startCapture (isRunning=\(self.captureSession.isRunning, privacy: .public))")
         guard !captureSession.isRunning else { return }
         DispatchQueue.global(qos: .userInitiated).async { self.captureSession.startRunning() }
     }
 
     private func stopCapture() {
-        FileHandle.standardError.write(Data("DIAG: stopCapture (isRunning=\(captureSession.isRunning))\n".utf8))
+        Self.routeLog.info("stopCapture (isRunning=\(self.captureSession.isRunning, privacy: .public))")
         guard captureSession.isRunning else { return }
         DispatchQueue.global(qos: .userInitiated).async { self.captureSession.stopRunning() }
     }
@@ -1670,7 +1718,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         // Converter state persists for continuous stream. No reset needed.
         if !diagLoggedFirstSample {
             diagLoggedFirstSample = true
-            FileHandle.standardError.write(Data("DIAG: captureOutput first sample received\n".utf8))
+            Self.routeLog.info("captureOutput first sample received")
         }
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
         // Use AudioStreamBasicDescription to create AVAudioFormat
