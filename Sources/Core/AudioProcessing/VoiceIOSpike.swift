@@ -37,8 +37,11 @@ public final class VoiceIOSpikeRunner {
     static let burstOnFrames = 48_000
     /// Linear fade at each ON/OFF boundary, to avoid a click that would itself correlate falsely.
     static let burstFadeMs: Double = 10
-    /// Burst amplitude (linear, well below clipping — this is a measurement signal, not content).
-    static let burstAmplitude: Float = 0.25
+    /// Burst amplitude (linear, below clipping — this is a measurement signal, not content).
+    /// 0.7 rather than 0.25: the self-echo ERLE measurement is floor-limited by room noise
+    /// (measured ~-46 dBFS ambient); the baseline echo must sit well above that floor for a
+    /// >= 20 dB ERLE to be measurable at all.
+    static let burstAmplitude: Float = 0.7
     /// Frames skipped at the start of every recording before ON/OFF analysis, to let DFN/VPIO's
     /// adaptive filters converge past their startup transient (3.0s @ 48 kHz).
     static let convergenceSkipFrames = 144_000
@@ -265,38 +268,61 @@ public final class VoiceIOSpikeRunner {
         let reference = makeBurstSignal(durationSec: options.durationSec, sampleRate: 48_000)
         try writeWav(reference, sampleRate: 48_000, to: referencePath)
 
-        print("Playing the reference burst via a SEPARATE process (afplay) while recording through")
-        print("VPIO-enabled capture only (NoNoise itself renders nothing) — this checks whether VPIO's")
-        print("echo cancellation, which only knows about THIS process's own output, leaves a")
-        print("cross-process echo uncancelled.")
-        let player = Process()
-        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-        player.arguments = [referencePath]
-        try player.run()
-        // Guarantee afplay never outlives this scenario: if `recordPass` throws before afplay
-        // finishes on its own (e.g. the engine failed to start), terminate it rather than leaking
-        // a background process; `waitUntilExit()` always reaps it either way.
-        defer {
-            if player.isRunning { player.terminate() }
-            player.waitUntilExit()
+        print("Playing the reference burst via a SEPARATE process (afplay) while recording — first")
+        print("WITHOUT voice processing (control: proves the burst actually reaches the mic), then")
+        print("WITH voice processing. Comparing the two shows whether VPIO's echo cancellation also")
+        print("covers OTHER processes' output (its reference may be limited to this process's own).")
+
+        // One afplay launch per pass; the defer guarantees the player never outlives its pass.
+        // afplay is launched from `onRecordingStarted` — i.e. only once the engine is live — so
+        // its signal lands at a small POSITIVE lag the correlation search can actually find.
+        func recordWhilePlaying(voiceProcessing: Bool) async throws -> RecordedPass {
+            let player = Process()
+            player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+            player.arguments = [referencePath]
+            defer {
+                if player.isRunning { player.terminate() }
+                if player.processIdentifier != 0 { player.waitUntilExit() }
+            }
+            return try await recordPass(engineOptions: SpikeEngineOptions(voiceProcessing: voiceProcessing, inputDevice: device),
+                                        durationSec: options.durationSec,
+                                        onRecordingStarted: { try player.run() })
         }
 
-        let captured = try await recordPass(engineOptions: SpikeEngineOptions(voiceProcessing: true, inputDevice: device),
-                                            durationSec: options.durationSec)
+        print("Pass 1/2: Voice Processing OFF (control)...")
+        let baseline = try await recordWhilePlaying(voiceProcessing: false)
+        let baselinePath = path(options, "spike-cross-baseline.wav")
+        try writeWav(baseline.samples, sampleRate: baseline.sampleRate, to: baselinePath)
 
+        print("Pass 2/2: Voice Processing ON...")
+        let captured = try await recordWhilePlaying(voiceProcessing: true)
         let recordingPath = path(options, "spike-cross-recorded.wav")
         try writeWav(captured.samples, sampleRate: captured.sampleRate, to: recordingPath)
+
+        let baselineReference = resample(reference, fromRate: 48_000, toRate: baseline.sampleRate)
+        let baselineMaxLag = scaledFrames(Self.correlationMaxLagFrames48k, forSampleRate: baseline.sampleRate)
+        let baseCorr = AECSpikeAnalysis.normalizedCrossCorrelationPeak(reference: baselineReference, recorded: baseline.samples, maxLagFrames: baselineMaxLag)
+        // The control pass must show the burst in the mic signal, or the ON pass proves nothing
+        // (afplay silent, output on another device, volume at zero, ...).
+        let baselineCaptured = baseCorr.peak >= Self.selfEchoOffCorrelationWarningThreshold
 
         let referenceForAnalysis = resample(reference, fromRate: 48_000, toRate: captured.sampleRate)
         let maxLag = scaledFrames(Self.correlationMaxLagFrames48k, forSampleRate: captured.sampleRate)
         let corr = AECSpikeAnalysis.normalizedCrossCorrelationPeak(reference: referenceForAnalysis, recorded: captured.samples, maxLagFrames: maxLag)
         let detected = AECSpikeAnalysis.crossProcessEchoDetected(correlationPeak: corr.peak)
 
-        results.cross = CrossResult(recordingPath: recordingPath, referencePath: referencePath,
+        let note: String? = baselineCaptured ? nil :
+            "Control pass correlation (\(baseCorr.peak)) is below \(Self.selfEchoOffCorrelationWarningThreshold) — the afplay " +
+            "burst never reached the mic (volume down? other output device?), so echoDetected is meaningless."
+        results.cross = CrossResult(recordingPath: recordingPath, baselineRecordingPath: baselinePath,
+                                    referencePath: referencePath,
                                     sampleRate: captured.sampleRate, recorderStatus: captured.status,
-                                    correlationPeak: corr.peak, correlationLagFrames: corr.lagFrames, echoDetected: detected)
-        print(String(format: "Cross-process correlation peak=%.3f lag=%dframes echoDetected=%@",
-                    corr.peak, corr.lagFrames, detected ? "true" : "false"))
+                                    baselineCorrelationPeak: baseCorr.peak, baselineCorrelationLagFrames: baseCorr.lagFrames,
+                                    correlationPeak: corr.peak, correlationLagFrames: corr.lagFrames,
+                                    echoDetected: detected, baselineCaptured: baselineCaptured, note: note)
+        print(String(format: "Cross-process: control peak=%.3f (captured=%@) | VPIO-on peak=%.3f lag=%d echoDetected=%@",
+                    baseCorr.peak, baselineCaptured ? "yes" : "NO", corr.peak, corr.lagFrames, detected ? "true" : "false"))
+        if let note { print("NOTE: \(note)") }
     }
 
     // MARK: - Scenario: format
@@ -550,7 +576,11 @@ public final class VoiceIOSpikeRunner {
 
         let capacityFrames = Int(options.durationSec * Double(Self.recorderCapacitySafetySampleRate)) + Self.recorderCapacitySafetySampleRate
         let recorder = SpikeRecorder(capacityFrames: capacityFrames)
-        engine.inputNode.installTap(onBus: 0, bufferSize: Self.tapBufferSizeFrames, format: nil) { buffer, _ in
+        // Same two format rules as `recordPass` (they are what makes a VPIO engine with a playback
+        // graph start at all — see the -10875 notes there): explicit mono tap format, fixed
+        // standard stereo on the mixer→output connection.
+        engine.inputNode.installTap(onBus: 0, bufferSize: Self.tapBufferSizeFrames,
+                                    format: AudioUtils.shared.processingFormat) { buffer, _ in
             guard let channel = buffer.floatChannelData?[0] else { return }
             recorder.append(channel, count: Int(buffer.frameLength))
         }
@@ -564,7 +594,8 @@ public final class VoiceIOSpikeRunner {
         }
         engine.attach(sourceNode)
         engine.connect(sourceNode, to: engine.mainMixerNode, format: AudioUtils.shared.processingFormat)
-        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode,
+                       format: AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
         engine.prepare()
 
         let startWallBegin = DispatchTime.now()
@@ -595,7 +626,11 @@ public final class VoiceIOSpikeRunner {
         let referenceForAnalysis = resample(burst, fromRate: 48_000, toRate: sampleRate)
         let maxLag = scaledFrames(Self.correlationMaxLagFrames48k, forSampleRate: sampleRate)
         let corr = AECSpikeAnalysis.normalizedCrossCorrelationPeak(reference: referenceForAnalysis, recorded: recorded, maxLagFrames: maxLag)
-        let loopLatencyMs = sampleRate > 0 ? Double(corr.lagFrames) / sampleRate * 1000 : 0
+        // This is a VPIO-ON run, so a WORKING echo canceller removes the very signal the lag
+        // estimate needs — a sub-threshold peak means the lag is noise-driven, and the latency
+        // estimate is reported as -1 (unavailable) rather than a made-up number.
+        let lagReliable = corr.peak >= Self.selfEchoOffCorrelationWarningThreshold
+        let loopLatencyMs = (lagReliable && sampleRate > 0) ? Double(corr.lagFrames) / sampleRate * 1000 : -1
 
         results.perf = PerfResult(cpuUserSecondsDelta: userDelta, cpuSystemSecondsDelta: sysDelta,
                                   engineStartWallMs: engineStartMs, loopLatencyMsEstimate: loopLatencyMs,
@@ -799,13 +834,19 @@ public final class VoiceIOSpikeRunner {
     /// present) uses a pre-allocated `SpikePlaybackSource` from the source-node render callback —
     /// matching the project's no-realtime-allocation rule.
     private func recordPass(engineOptions: SpikeEngineOptions, durationSec: Double,
-                            playback: [Float]? = nil) async throws -> RecordedPass {
+                            playback: [Float]? = nil,
+                            onRecordingStarted: (() throws -> Void)? = nil) async throws -> RecordedPass {
         let engine = try buildEngine(engineOptions)
         let inputNode = engine.inputNode
 
         let capacityFrames = Int(durationSec * Double(Self.recorderCapacitySafetySampleRate)) + Self.recorderCapacitySafetySampleRate
         let recorder = SpikeRecorder(capacityFrames: capacityFrames)
-        inputNode.installTap(onBus: 0, bufferSize: Self.tapBufferSizeFrames, format: nil) { buffer, _ in
+        // Explicit mono 48 kHz tap format: with Voice Processing enabled the input node reports a
+        // multi-channel internal format (7ch observed); leaving the tap at `nil` makes that the
+        // client-side input format, which then mismatches the 2ch output graph and fails
+        // engine.start() with -10875 ("client-side input and output formats do not match").
+        inputNode.installTap(onBus: 0, bufferSize: Self.tapBufferSizeFrames,
+                             format: AudioUtils.shared.processingFormat) { buffer, _ in
             guard let channel = buffer.floatChannelData?[0] else { return }
             recorder.append(channel, count: Int(buffer.frameLength))
         }
@@ -821,7 +862,12 @@ public final class VoiceIOSpikeRunner {
             }
             engine.attach(node)
             engine.connect(node, to: engine.mainMixerNode, format: AudioUtils.shared.processingFormat)
-            engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
+            // Explicit fixed-format connection: under Voice Processing, `format: nil` (the mixer's
+            // own format) can mismatch the VPIO output element's client format and fail
+            // engine.start() with -10875 — and `outputNode.outputFormat(forBus: 0)` is not yet
+            // valid at connect time (0 Hz/0 ch → NSException), so a fixed standard format is used.
+            engine.connect(engine.mainMixerNode, to: engine.outputNode,
+                           format: AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
             sourceNode = node
         }
 
@@ -838,6 +884,11 @@ public final class VoiceIOSpikeRunner {
             inputNode.removeTap(onBus: 0)
             engine.reset()
         }
+
+        // Runs only once recording is live: an external sound source (afplay) started BEFORE this
+        // point would put its signal at a NEGATIVE lag relative to the recording, which the
+        // positive-lag-only correlation search can never find.
+        try onRecordingStarted?()
 
         try await Task.sleep(nanoseconds: nanoseconds(forSeconds: durationSec))
 
@@ -1167,12 +1218,17 @@ private struct SelfEchoResult: Encodable {
 
 private struct CrossResult: Encodable {
     let recordingPath: String
+    let baselineRecordingPath: String
     let referencePath: String
     let sampleRate: Double
     let recorderStatus: SpikeRecorderStatus
+    let baselineCorrelationPeak: Float
+    let baselineCorrelationLagFrames: Int
     let correlationPeak: Float
     let correlationLagFrames: Int
     let echoDetected: Bool
+    let baselineCaptured: Bool
+    let note: String?
 }
 
 private struct FormatResult: Encodable {

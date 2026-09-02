@@ -5,7 +5,46 @@ for the must-read failure modes.
 
 ---
 
-### [GOTCHA] 2026-09-01 — Receive cleanup on the built-in speaker defeats the call app's echo canceller (echo/howling)
+### [DECISION] 2026-09-02 — AEC feasibility spike PASSED: Voice Processing I/O cancels our playback (ERLE 50.7 dB) — GO for the VPIO capture re-architecture
+- **Harness**: `NoNoiseMacCLI --aec-spike <scenario>` (`Sources/Core/AudioProcessing/VoiceIOSpike.swift`
+  + pure `AECSpikeAnalysis`). Measured on a MacBook Air (M-series), built-in mic + built-in
+  speakers, system output volume 65/100, burst amplitude 0.7.
+- **(a) self — the go/no-go gate: PASS.** VPIO OFF baseline echo RMS 0.0717 → VPIO ON residual
+  0.000208 = **ERLE 50.7 dB** (gate: ≥ 20), residual −73.6 dBFS (gate: ≤ −45), reference
+  correlation 0.29 → 0.007. The residual sits BELOW the ambient floor (0.0036): during far-end-only
+  intervals Apple's voice processor also gates/suppresses the mic, not just subtracts the echo.
+- **(b) cross — SURPRISE: other processes' audio is ALSO cancelled.** Control (VPIO OFF) proves the
+  afplay burst reaches the mic (corr 0.285); VPIO ON drops it to 0.021. On this macOS the AEC
+  reference covers the **output device system-wide**, not just our own output bus (the
+  forums/WWDC reading had suggested own-process-only). Do NOT hard-depend on this until verified
+  across machines/OS versions — the architecture (receive-cleanup playback through the VPIO output
+  bus) stays as designed, with cross-process coverage as a bonus safety net for the cleanup-OFF case.
+- **(d)+(fixes) — what it takes to START a VPIO engine with a playback graph** (each of these
+  shipped-and-broke inside the spike itself):
+  - `installTap(format: nil)` adopts the input node's VPIO-internal format (**7ch/48k deinterleaved**
+    observed; 16 kHz observed earlier with a BT headset present) and then `engine.start()` fails with
+    **-10875** ("client-side input and output formats do not match"). Fix: explicit mono 48k tap format.
+  - `connect(mainMixer, to: outputNode, format: nil)` → same -10875. `outputFormat(forBus: 0)` at
+    connect time is **invalid (0 Hz/0 ch → NSException** `IsFormatSampleRateAndChannelCountValid`).
+    Fix: a FIXED `standardFormatWithSampleRate: 48000, channels: 2` connection format.
+  - A record-only VPIO engine (no output graph) starts but MAY deliver no input buffers (duplex
+    unit; observed "no tap buffer within 5 s" in the format scenario) — always give the VPIO engine
+    an output path, even if it renders silence.
+  - `kAudioOutputUnitProperty_CurrentDevice` after `engine.prepare()` → **-10849**
+    (kAudioUnitErr_Initialized). Pinning a non-default input needs the set BEFORE the AU is
+    initialized (or an explicit AudioUnitUninitialize/set/Initialize cycle) — Phase 2 must handle.
+  - An external player launched BEFORE recording starts lands at a NEGATIVE lag the positive-only
+    correlation search can't find (the cross scenario's first "cancellation" was this false
+    positive; the control pass caught it). Start external sources from `onRecordingStarted`.
+- **(f) tap coexistence**: `IncomingCleanupEngine` (process tap) starts cleanly while the VPIO
+  engine runs — no crash, no teardown. Deep interaction (audio flowing through both) is a Phase 2
+  HITL item. **(g) perf**: engine.start ≈ 49 ms wall; CPU delta contaminated by the harness's own
+  O(N·lag) correlation math — measure streaming cost separately in Phase 2.
+- **(e) agc is the one scenario needing a human** (30 s of speech, listen to the WAVs) — HITL, not
+  yet run. AGC is disabled via `isVoiceProcessingAGCEnabled = false` (available since 10.15 — the
+  macOS 14 gate the first implementation used was wrong).
+- **Verdict**: proceed with Phase 1 (capture-backend abstraction) and Phase 2 (VoiceIOEngine) of
+  the approved plan. Fallback (WebRTC AEC3) not needed.
 - **Symptom** (field report, Meet group call, no earphones): the far side hears themselves back,
   the user hears faint howling, and other participants' mic-activity marks flicker.
 - **Root cause**: with the call app's speaker set to "NoNoise Speaker", the app's own AEC uses
