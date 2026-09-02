@@ -7,7 +7,7 @@ import CoreAudio
 import Accelerate
 import os
 
-public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+public class AudioModel: NSObject, ObservableObject {
     /// Route/lifecycle diagnostics — the permanent replacement for the temporary DIAG stderr
     /// logging (330280c). Queryable after the fact via
     /// `log stream --predicate 'subsystem == "com.korezonzi.NoNoiseMac.r2"'`. Every call site is
@@ -21,7 +21,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         didSet {
         }
     }
-    @Published public var inputDevices: [AVCaptureDevice] = [] // Changed to AVCaptureDevice
+    @Published public var inputDevices: [MicDevice] = []
     @Published public var selectedInputDeviceID: String = "" { // IDs are Strings in AVCapture
         didSet {
              guard selectedInputDeviceID != oldValue else { return }
@@ -138,7 +138,6 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     // consumer app is using "NoNoise Mic" (observed via kAudioDevicePropertyDeviceIsRunningSomewhere).
     // Without the driver (BlackHole fallback) there's no per-use signal, so we capture continuously.
     private var micDeviceID: AudioObjectID = 0
-    private var diagLoggedFirstSample = false
     private var isRunningSomewhereListener: AudioObjectPropertyListenerBlock?
     private var isRunningSomewhereAddr = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
@@ -382,11 +381,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         public let name: String
     }
     
-    // Capture (Input)
-    private let captureSession = AVCaptureSession()
-    private let captureOutput = AVCaptureAudioDataOutput()
-    private let processingQueue = DispatchQueue(label: "audio.processing.queue", qos: .userInteractive)
-    
+    // Capture (Input) — behind the MicCaptureBackend protocol so Phase 2 (Apple Voice Processing
+    // I/O) can add a second backend without changing this class's logic. Injected via init() (see
+    // below) so a fake backend can be substituted; production call sites are unaffected by the
+    // default argument.
+    private let micBackend: MicCaptureBackend
+
     // Playback (Output)
     private let engine = AVAudioEngine()
     private var playbackSourceNode: AVAudioSourceNode! 
@@ -417,28 +417,34 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     // Invalidates deferred speaker-engine starts (see applySpeakerCleanup's run-loop-tick defer).
     private var speakerApplyGeneration: UInt64 = 0
 
-    public override init() {
+    /// - Parameter micBackend: The mic-capture backend to use. Defaults to `AVCaptureMicBackend()`
+    ///   so `AudioModel()` (every existing production call site) is unaffected. The parameter exists
+    ///   as an injection seam for Phase 2 (Apple Voice Processing I/O backend); `AudioModel` itself
+    ///   still cannot be constructed headlessly (this initializer also starts CoreAudio/AVFoundation
+    ///   listeners — see AGENTS.md's note on `applyProfile`).
+    public init(micBackend: MicCaptureBackend = AVCaptureMicBackend()) {
+        self.micBackend = micBackend
         super.init()
-        
+
         let bufferRef = ringBuffer
         let dsp = dspEngine
         let chain = voiceChain
-        
+        let latencyTarget = AudioLatency.ringTargetFrames
+
         playbackSourceNode = AVAudioSourceNode { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
             guard let data = abl[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
             let count = Int(frameCount)
-            
+
             // 1. Test Tone
             if let self = self, self.isPlayingTestTone {
                  for i in 0..<count {
-                     data[i] = Float.random(in: -0.1...0.1) 
+                     data[i] = Float.random(in: -0.1...0.1)
                  }
                  return noErr
             }
-            
+
             // 2. Latency
-            let latencyTarget = 2400
             let available = bufferRef.count
             if available > (latencyTarget + count) {
                 bufferRef.drop(available - latencyTarget)
@@ -467,6 +473,12 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
             return noErr
         }
         
+        // Wire the active mic backend's output into ingest() (raw ring buffer + telemetry).
+        // Runs on the backend's own non-realtime capture queue — never the render thread.
+        micBackend.onAudio = { [weak self] floatData, count in
+            self?.ingest(floatData, count: count)
+        }
+
         checkPermissions()
         fetchInputDevices()
         fetchOutputDevices()
@@ -480,9 +492,9 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         installHardwareDeviceListener()
         installEngineConfigurationChangeObserver()
         loadSettings()
-        // Fixed pipeline latency: ring-buffer target (2400 samples) + one STFT frame
-        // (960 samples) @ 48 kHz. Reported as the "added latency" readout, not measured.
-        addedLatencyMs = Float(2400 + 960) / 48000.0 * 1000.0   // = 70 ms
+        // Fixed pipeline latency: ring-buffer target + one STFT frame @ 48 kHz. Reported as the
+        // "added latency" readout, not measured.
+        addedLatencyMs = AudioLatency.addedMs   // = 70 ms
         startControlPump()   // always-on audio-control loop (Smart Level + loudness); never gated
     }
 
@@ -1196,9 +1208,10 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
         devs = devs.filter { VirtualMicRouting.filterInputs([$0.localizedName]).isEmpty == false }
         // Sort: Built-in first?
         devs.sort { $0.localizedName < $1.localizedName }
-        
+        let micDevices = devs.map { MicDevice(uid: $0.uniqueID, name: $0.localizedName) }
+
         DispatchQueue.main.async {
-            self.inputDevices = devs
+            self.inputDevices = micDevices
             self.applyInputSelection()
         }
     }
@@ -1216,7 +1229,7 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     private func applyInputSelection() {
         let resolved = VirtualMicRouting.resolveInputDeviceUID(
             selection: inputDeviceSelection,
-            available: inputDevices.map { $0.uniqueID },
+            available: inputDevices.map { $0.uid },
             defaultUID: AVCaptureDevice.default(for: .audio)?.uniqueID,
             current: selectedInputDeviceID.isEmpty ? nil : selectedInputDeviceID)
         let target = resolved ?? ""
@@ -1224,40 +1237,16 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     }
 
     func setupCaptureSession() {
-        captureSession.stopRunning()
-        captureSession.beginConfiguration()
-        captureSession.inputs.forEach { captureSession.removeInput($0) }
-        captureSession.outputs.forEach { captureSession.removeOutput($0) }
-        
-        do {
-            guard let device = AVCaptureDevice(uniqueID: selectedInputDeviceID) else {
-                print("Device not found: \(selectedInputDeviceID)")
-                captureSession.commitConfiguration()
-                return
-            }
-            
-            let input = try AVCaptureDeviceInput(device: device)
-            if captureSession.canAddInput(input) {
-                captureSession.addInput(input)
-            }
-            
-            if captureSession.canAddOutput(captureOutput) {
-                captureSession.addOutput(captureOutput)
-                captureOutput.setSampleBufferDelegate(self, queue: processingQueue)
-            }
-            
-        } catch {
-            print("Capture Setup Error: \(error)")
-        }
-        
-        captureSession.commitConfiguration()
+        // A failed configure (device not found — hit at first launch, when selectedInputDeviceID
+        // is still "" ahead of fetchInputDevices()'s async resolve — or the session refused the
+        // input) must NOT reach start(), matching the pre-extraction setupCaptureSession's early
+        // `return` on device-not-found.
+        let configured = micBackend.configure(deviceUID: selectedInputDeviceID)
 
         // Only hold the real mic when we actually need it (see on-demand mode). In always-on mode
         // (no driver) this is always true, preserving the previous behavior.
-        if shouldCapture {
-            DispatchQueue.global(qos: .userInitiated).async {
-                self.captureSession.startRunning()
-            }
+        if configured && shouldCapture {
+            micBackend.start()
         }
     }
 
@@ -1462,15 +1451,13 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
     }
 
     private func startCapture() {
-        Self.routeLog.info("startCapture (isRunning=\(self.captureSession.isRunning, privacy: .public))")
-        guard !captureSession.isRunning else { return }
-        DispatchQueue.global(qos: .userInitiated).async { self.captureSession.startRunning() }
+        Self.routeLog.info("startCapture (isRunning=\(self.micBackend.isRunning, privacy: .public))")
+        micBackend.start()
     }
 
     private func stopCapture() {
-        Self.routeLog.info("stopCapture (isRunning=\(self.captureSession.isRunning, privacy: .public))")
-        guard captureSession.isRunning else { return }
-        DispatchQueue.global(qos: .userInitiated).async { self.captureSession.stopRunning() }
+        Self.routeLog.info("stopCapture (isRunning=\(self.micBackend.isRunning, privacy: .public))")
+        micBackend.stop()
     }
 
     // MARK: - Input Volume, telemetry & Smart Level
@@ -1708,98 +1695,26 @@ public class AudioModel: NSObject, ObservableObject, AVCaptureAudioDataOutputSam
 
     
     private var PermissionCheckOnce = false
-    
-    // Converter State
-    private var inputConverter: AVAudioConverter?
-    private var inputPCMBuffer: AVAudioPCMBuffer?
-    private var inputBuffer48k: AVAudioPCMBuffer?
-    
-    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        // Converter state persists for continuous stream. No reset needed.
-        if !diagLoggedFirstSample {
-            diagLoggedFirstSample = true
-            Self.routeLog.info("captureOutput first sample received")
-        }
-        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-        // Use AudioStreamBasicDescription to create AVAudioFormat
-        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else { return }
-        
-        // 1. Determine Input Format
-        guard let inputFormat = AVAudioFormat(streamDescription: asbd) else { return }
-        
-        // 2. Define Target Format (48kHz, Float32, Mono)
-        guard let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000.0, channels: 1, interleaved: false) else { return }
-        
-        // 3. Setup Converter if needed
-        if inputConverter == nil || inputConverter?.inputFormat != inputFormat {
-             print("AudioModel: Initializing Converter \(inputFormat.sampleRate) -> 48000")
-             inputConverter = AVAudioConverter(from: inputFormat, to: targetFormat)
-            
-             // Create Buffers
-             let maxInputFrames = AVAudioFrameCount(4096)
-             inputPCMBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: maxInputFrames)
-            
-             let ratio = targetFormat.sampleRate / inputFormat.sampleRate
-             let maxOutputFrames = AVAudioFrameCount(Double(maxInputFrames) * ratio + 5)
-             inputBuffer48k = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: maxOutputFrames)
-        }
-        
-        guard let converter = inputConverter,
-              let inputBuffer = inputPCMBuffer,
-              let outputBuffer = inputBuffer48k else { return }
-              
-        // 4. Copy Data Directly to InputPCMBuffer
-        let numSamples = CMSampleBufferGetNumSamples(sampleBuffer)
-        inputBuffer.frameLength = AVAudioFrameCount(numSamples)
-        
-        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
-            sampleBuffer,
-            at: 0,
-            frameCount: Int32(numSamples),
-            into: inputBuffer.mutableAudioBufferList
-        )
-        
-        guard status == noErr else { 
-            print("AudioModel Error: CMSampleBufferCopyPCMDataIntoAudioBufferList failed with \(status)")
-            return 
-        }
-        
-        // 6. Convert
-        var error: NSError? = nil
-        
-        // Input Block
-        var haveFed = false
-        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-           if !haveFed {
-               outStatus.pointee = .haveData
-               haveFed = true
-               return inputBuffer
-           } else {
-               outStatus.pointee = .noDataNow
-               return nil
-           }
-        }
-        
-        outputBuffer.frameLength = outputBuffer.frameCapacity
-        converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
-        
-        // 7. Write to Ring Buffer
-        let convertedFrames = Int(outputBuffer.frameLength)
-        
-        if convertedFrames > 0, let floatData = outputBuffer.floatChannelData?[0] {
-             // Trim in place and measure raw (source) + trimmed (NoNoise input) levels in one
-             // allocation-free helper (raw scan → in-place trim → trimmed scan). The meter must
-             // reflect the trimmed signal that enters ringBuffer.write, while raw peak/clip still
-             // report physical/source clipping that trim cannot repair.
-             let telemetry = SmartLevelController.applyInputVolumeAndMeasure(
-                floatData, count: convertedFrames, volume: realtimeInputVolume)
-             recordInputTelemetry(rawPeak: telemetry.rawPeak,
-                                  trimmedPeak: telemetry.trimmedPeak,
-                                  rms: telemetry.trimmedRMS,
-                                  rawClipSamples: telemetry.rawClipSamples,
-                                  trimmedHotSamples: telemetry.trimmedHotSamples)
 
-             _ = self.ringBuffer.write(floatData, count: convertedFrames)
-        }
+    // MARK: - Mic ingest (backend → AudioModel)
+
+    /// Receives normalized mono/48kHz/Float32 audio from the active `MicCaptureBackend` (wired via
+    /// `micBackend.onAudio` in `init()`). Runs on the backend's own non-realtime capture queue —
+    /// the same thread `captureOutput(_:didOutput:from:)` ran this logic on before the Phase 1
+    /// capture-backend extraction moved format conversion into `AVCaptureMicBackend`.
+    private func ingest(_ floatData: UnsafeMutablePointer<Float>, count: Int) {
+        // Trim in place and measure raw (source) + trimmed (NoNoise input) levels in one
+        // allocation-free helper (raw scan → in-place trim → trimmed scan). The meter must
+        // reflect the trimmed signal that enters ringBuffer.write, while raw peak/clip still
+        // report physical/source clipping that trim cannot repair.
+        let telemetry = SmartLevelController.applyInputVolumeAndMeasure(
+            floatData, count: count, volume: realtimeInputVolume)
+        recordInputTelemetry(rawPeak: telemetry.rawPeak,
+                             trimmedPeak: telemetry.trimmedPeak,
+                             rms: telemetry.trimmedRMS,
+                             rawClipSamples: telemetry.rawClipSamples,
+                             trimmedHotSamples: telemetry.trimmedHotSamples)
+
+        _ = self.ringBuffer.write(floatData, count: count)
     }
 }

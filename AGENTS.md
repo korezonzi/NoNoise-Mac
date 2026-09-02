@@ -18,7 +18,26 @@ cable so any app (Zoom, Meet, Discord, OBS, …) receives studio-clean audio.
 
 ## Architecture map
 - `Sources/Core` — engine, no UI:
-  - `AudioModel` — CoreAudio/AVFoundation capture + playback, ring buffer, render callback, preset/knob state + persistence.
+  - `AudioModel` — playback + preset/knob state + persistence, ring buffer, render callback. Mic
+    capture itself goes through the `MicCaptureBackend` protocol (below), NOT AVCapture directly —
+    `AudioModel` keeps only the permission API (`AVCaptureDevice.authorizationStatus`/
+    `requestAccess`), device discovery (`AVCaptureDevice.DiscoverySession`), and default-device
+    lookup (`AVCaptureDevice.default(for:)`).
+  - `MicCaptureBackend` — protocol for a single mic-capture producer (`configure(deviceUID:) ->
+    Bool`, `start()`/`stop()`/`isRunning`, an `onAudio` callback) plus `MicDevice` (the pure
+    uid/name value type `AudioModel.inputDevices` is made of). Injected into `AudioModel.init(micBackend:)`
+    (defaults to `AVCaptureMicBackend()`, so existing call sites are unaffected) so a second,
+    Apple-Voice-Processing-I/O-based backend can be added later without touching `AudioModel`.
+  - `AVCaptureMicBackend` — the `MicCaptureBackend` built on `AVCaptureSession` +
+    `AVCaptureAudioDataOutput`; the `AVCaptureAudioDataOutputSampleBufferDelegate` conformance and
+    the CMSampleBuffer → 48 kHz mono `AVAudioConverter` pipeline live here (moved out of
+    `AudioModel`), including the render-callback-adjacent `configure`/`start`/`stop` contract:
+    `configure` returns `true` only if an input was actually attached (device resolved AND the
+    session accepted it), so a failed configure never reaches `start()`.
+  - `AudioLatency` — the pipeline's fixed sample rate (48 kHz) and latency budget (ring-buffer
+    target + one STFT hop) as named constants, shared by `AudioModel`'s render callback,
+    `AVCaptureMicBackend`'s capture-side target format, and `IncomingCleanupEngine`/
+    `SpeakerCleanupEngine`'s latency trim — previously four separate hardcoded literals.
   - `AudioProcessing/DeepFilterNetDSP` — STFT → DeepFilterNet feature pipeline → CoreML call → ISTFT → wet/dry blend.
   - `AudioProcessing/DeepFilterNet3_Streaming` — generated CoreML model wrapper.
   - `AudioProcessing/VoiceChain` + `Biquad` + `Dynamics` — post-DSP "voice polish" (high-pass → shelves → compressor → limiter) plus the optional **Broadcast Voice** clarity stages (presence peaking bell → subtractive `DeEsser`) and optional **Mouth Noise** finisher stages (subtractive `DePlosive` → broadband-gate `DeClick`). Driven by `ClarityLevel` + `MouthNoiseLevel`, each is gated independently of the noise preset.

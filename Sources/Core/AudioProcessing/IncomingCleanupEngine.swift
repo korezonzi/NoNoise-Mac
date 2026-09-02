@@ -81,12 +81,12 @@ public final class IncomingCleanupEngine {
         let ringPtr = ring.cRing
         let dspRef = dsp
         let levelPtr = levelBox
+        let latencyTarget = AudioLatency.ringTargetFrames
         sourceNode = AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
             guard let data = abl[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
             let count = Int(frameCount)
             // Latency trim (same shape as AudioModel's render callback).
-            let latencyTarget = 2400
             let available = Int(tap_ring_available(ringPtr))
             if available > latencyTarget + count { tap_ring_drop(ringPtr, UInt32(available - latencyTarget)) }
             if tap_ring_read(ringPtr, data, UInt32(count)) == 0 {

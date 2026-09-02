@@ -72,13 +72,13 @@ case .live(let input, let output, let gain):
     let model = AudioModel()
     RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.0))
 
-    if let inDev = model.inputDevices.first(where: { $0.localizedName.localizedCaseInsensitiveContains(input) }) {
-        print("Selecting Input: \(inDev.localizedName)")
+    if let inDev = model.inputDevices.first(where: { $0.name.localizedCaseInsensitiveContains(input) }) {
+        print("Selecting Input: \(inDev.name)")
         // Manual selection, NOT a direct selectedInputDeviceID write: a direct write is discarded
         // by the next fetchInputDevices() → applyInputSelection() pass (auto mode re-resolves to
         // the system default on every device change). The CLI runs in its own defaults domain,
         // so the didSet's persistence is inert for the app.
-        model.inputDeviceSelection = inDev.uniqueID
+        model.inputDeviceSelection = inDev.uid
     } else {
         print("Error: Input device '\(input)' not found.")
         exit(1)

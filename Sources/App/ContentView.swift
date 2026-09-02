@@ -336,7 +336,7 @@ struct ContentView: View {
     /// The device name actually in effect when `inputDeviceSelection == .auto` — resolves
     /// `selectedInputDeviceID` (the runtime-resolved capture device) against the current list.
     private var effectiveInputDeviceName: String {
-        audioModel.inputDevices.first(where: { $0.uniqueID == audioModel.selectedInputDeviceID })?.localizedName ?? "—"
+        audioModel.inputDevices.first(where: { $0.uid == audioModel.selectedInputDeviceID })?.name ?? "—"
     }
 
     private var devicesCard: some View {
@@ -347,13 +347,13 @@ struct ContentView: View {
                         .frame(width: 74, alignment: .leading)
                     Picker("", selection: $audioModel.inputDeviceSelection) {
                         Text("自動（システムデフォルト）").tag(VirtualMicRouting.autoInputSelection)
-                        ForEach(audioModel.inputDevices, id: \.uniqueID) { device in
-                            Text(device.localizedName).tag(device.uniqueID)
+                        ForEach(audioModel.inputDevices, id: \.uid) { device in
+                            Text(device.name).tag(device.uid)
                         }
                         // Placeholder so a saved-but-currently-unplugged manual selection doesn't
                         // render as a blank/mismatched picker value.
                         if audioModel.inputDeviceSelection != VirtualMicRouting.autoInputSelection,
-                           !audioModel.inputDevices.contains(where: { $0.uniqueID == audioModel.inputDeviceSelection }) {
+                           !audioModel.inputDevices.contains(where: { $0.uid == audioModel.inputDeviceSelection }) {
                             Text("（未接続のデバイス）").tag(audioModel.inputDeviceSelection)
                         }
                     }
