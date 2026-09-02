@@ -242,9 +242,10 @@ Do not add entitlements beyond these two without a measured, documented need.
 - A **Voice Profile** is a named snapshot of ALL user-tunable settings (`selectedPreset`, `suppressionStrength`, `attenuationLimitDb`, `outputGainValue`, `voicePolishEnabled`, `clarityLevel`) persisted as a JSON array under `mv.profiles`. Applying a profile goes through the same `isApplyingPreset` guard as `applyPreset` + `applyVoiceChain` — all `@Published` properties are set inside `isApplyingPreset = true … = false`, then a single `applyVoiceChain()` and `persistSettings()` are called after. This prevents spurious `onKnobChanged` → `.custom` flips or redundant persists mid-apply. Future settings fields must be added to `VoiceProfile` as optionals (schema version stays at 1) so old profiles survive without migration.
 
 ## CLI offline file mode
-- **Three CLI modes** (mutually exclusive): live device `--in`/`--out`, one-shot `--action`, offline `--denoise`/`--output`. Parser lives in `Sources/Core/CLIArguments.swift` (unit-tested).
+- **Four CLI modes** (mutually exclusive): live device `--in`/`--out`, one-shot `--action`, offline `--denoise`/`--output`, and the dev-only `--aec-spike <scenario>` diagnostic mode. Parser lives in `Sources/Core/CLIArguments.swift` (unit-tested).
 - **Offline path** — `AudioFileDenoiser` decodes with AVFoundation, waits on `DeepFilterNetDSP.waitUntilReady()`, streams mono 48 kHz through DFN then preset `VoiceChain`, writes via temp file + atomic move. MP4/video remux is explicitly out of scope.
 - **Preset knobs** — `--preset` resolves DSP defaults from `VoicePreset.parameters`; explicit `--gain` / `--strength` / `--attenuation-db` override after preset resolution (same precedence as the plan's parser tests).
+- **`--aec-spike`** is a throwaway-adjacent feasibility harness for the Apple Voice Processing I/O echo-fix candidate (`Sources/Core/AudioProcessing/VoiceIOSpike.swift` + `AECSpikeAnalysis.swift`) — not a user-facing feature, deliberately hidden behind this flag.
 
 ## Control layer (Tier 4) — `Sources/Core/ControlLayer.swift`, `Sources/App/ActionDispatcher.swift`, `Sources/App/HotkeyManager.swift`
 

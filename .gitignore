@@ -18,3 +18,7 @@ NoNoiseMic.driver/
 # Scratch / local tooling
 test_cm
 .worktrees/
+
+# --aec-spike diagnostic output (writes to cwd unless --spike-out is given)
+spike-*.wav
+spike-results.json

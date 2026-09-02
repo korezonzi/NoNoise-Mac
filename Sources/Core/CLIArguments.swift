@@ -26,11 +26,58 @@ public struct AudioDenoiseOptions: Equatable {
     }
 }
 
+/// The scenarios `VoiceIOSpikeRunner` understands, plus `.all` (runs the other seven in
+/// declaration order). `CaseIterable` is the single source of truth for `AECSpikeOptions
+/// .validScenarios` and for the runner's own scenario dispatch — see `VoiceIOSpikeScenarioTests`
+/// for the equality check that keeps these two in sync.
+///
+/// The self-echo case is named `selfEcho` (not `self`) purely to dodge the `self` keyword; its
+/// raw value — the string actually typed on the command line — is still `"self"`.
+public enum AECSpikeScenario: String, CaseIterable, Equatable {
+    case all
+    case selfEcho = "self"
+    case cross
+    case format
+    case pin
+    case agc
+    case tap
+    case perf
+}
+
+/// Options for `--aec-spike <scenario>`, the throwaway-adjacent Apple Voice Processing I/O
+/// feasibility harness (see `VoiceIOSpikeRunner`). Kept a plain, `Equatable` value type — same
+/// pattern as `AudioDenoiseOptions` — so parsing stays independently unit-testable.
+public struct AECSpikeOptions: Equatable {
+    /// Derived from `AECSpikeScenario.allCases` — never list scenario names twice.
+    public static let validScenarios: Set<String> = Set(AECSpikeScenario.allCases.map { $0.rawValue })
+
+    /// Upper bound accepted for `--spike-duration`. Long enough for the `agc` scenario's fixed
+    /// 30s passes plus headroom; short enough to reject a fat-fingered value (e.g. minutes typed
+    /// as seconds) before it turns into a many-hour recording.
+    public static let maxSpikeDurationSec: Double = 600
+
+    public let scenario: String
+    public let outputDir: String
+    public let durationSec: Double
+    public let inputSelection: String?
+
+    public init(scenario: String,
+                outputDir: String = ".",
+                durationSec: Double = 10,
+                inputSelection: String? = nil) {
+        self.scenario = scenario
+        self.outputDir = outputDir
+        self.durationSec = durationSec
+        self.inputSelection = inputSelection
+    }
+}
+
 public enum CLIMode: Equatable {
     case help
     case live(input: String, output: String, gain: Float)
     case action(String)
     case denoise(AudioDenoiseOptions)
+    case aecSpike(AECSpikeOptions)
 }
 
 public enum CLIArguments {
@@ -39,6 +86,7 @@ public enum CLIArguments {
         case unknownOption(String)
         case invalidFloat(String, String)
         case invalidPreset(String)
+        case invalidSpikeScenario(String)
         case mixedModes
         case missingLiveDevice
 
@@ -48,7 +96,10 @@ public enum CLIArguments {
             case .unknownOption(let option): return "Unknown option \(option)."
             case .invalidFloat(let flag, let value): return "Invalid numeric value for \(flag): \(value)."
             case .invalidPreset(let value): return "Unknown preset \(value)."
-            case .mixedModes: return "Choose exactly one mode: live device pipeline, --action, or --denoise."
+            case .invalidSpikeScenario(let value):
+                let known = AECSpikeOptions.validScenarios.sorted().joined(separator: ", ")
+                return "Unknown --aec-spike scenario \(value). Expected one of: \(known)."
+            case .mixedModes: return "Choose exactly one mode: live device pipeline, --action, --denoise, or --aec-spike."
             case .missingLiveDevice: return "Missing --in or --out."
             }
         }
@@ -66,6 +117,10 @@ public enum CLIArguments {
         var strengthOverride: Float?
         var attenuationDbOverride: Float?
         var shouldOverwrite = false
+        var spikeScenario: String?
+        var spikeOutputDir = "."
+        var spikeDurationSec: Double = 10
+        var spikeInputSelection: String?
 
         var index = 1
         while index < arguments.count {
@@ -101,6 +156,28 @@ public enum CLIArguments {
                 attenuationDbOverride = try floatValue(after: arg, in: arguments, index: &index)
             case "--overwrite":
                 shouldOverwrite = true
+            case "--aec-spike":
+                let rawScenario = try value(after: arg, in: arguments, index: &index)
+                guard let scenario = AECSpikeScenario(rawValue: rawScenario.lowercased()) else {
+                    throw ParseError.invalidSpikeScenario(rawScenario)
+                }
+                spikeScenario = scenario.rawValue
+            case "--spike-out":
+                spikeOutputDir = try value(after: arg, in: arguments, index: &index)
+            case "--spike-duration":
+                // Parsed by hand (not via `floatValue`) because it needs stricter validation than
+                // "is a number": `Double("nan")`/`Double("inf")` both parse successfully, and an
+                // unchecked NaN/negative/zero/huge value later reaches `Int(durationSec * ...)` and
+                // `UInt64(durationSec * 1_000_000_000)` in VoiceIOSpikeRunner, which traps at
+                // runtime instead of failing gracefully at the CLI boundary.
+                let rawDuration = try value(after: arg, in: arguments, index: &index)
+                guard let parsedDuration = Double(rawDuration), parsedDuration.isFinite,
+                      parsedDuration > 0, parsedDuration <= AECSpikeOptions.maxSpikeDurationSec else {
+                    throw ParseError.invalidFloat(arg, rawDuration)
+                }
+                spikeDurationSec = parsedDuration
+            case "--spike-input":
+                spikeInputSelection = try value(after: arg, in: arguments, index: &index)
             default:
                 throw ParseError.unknownOption(arg)
             }
@@ -110,7 +187,8 @@ public enum CLIArguments {
         let hasLiveMode = inputName != nil || outputName != nil
         let hasActionMode = actionVerb != nil
         let hasDenoiseMode = denoiseInput != nil || denoiseOutput != nil
-        if [hasLiveMode, hasActionMode, hasDenoiseMode].filter({ $0 }).count > 1 {
+        let hasSpikeMode = spikeScenario != nil
+        if [hasLiveMode, hasActionMode, hasDenoiseMode, hasSpikeMode].filter({ $0 }).count > 1 {
             throw ParseError.mixedModes
         }
 
@@ -132,6 +210,14 @@ public enum CLIArguments {
                 strength: strengthOverride ?? presetDefaults.suppressionStrength,
                 attenuationDb: attenuationDbOverride ?? presetDefaults.attenuationLimitDb,
                 shouldOverwrite: shouldOverwrite
+            ))
+        }
+        if let spikeScenario {
+            return .aecSpike(AECSpikeOptions(
+                scenario: spikeScenario,
+                outputDir: spikeOutputDir,
+                durationSec: spikeDurationSec,
+                inputSelection: spikeInputSelection
             ))
         }
         guard let inputName, let outputName else { throw ParseError.missingLiveDevice }

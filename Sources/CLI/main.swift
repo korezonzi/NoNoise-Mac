@@ -20,6 +20,9 @@ case .help:
       NoNoiseMacCLI --action <verb>
       NoNoiseMacCLI --denoise <input-audio-file> --output <output-audio-file> [--preset auto|strong|medium|weak|custom] [--gain <float>] [--strength <0...1>] [--attenuation-db <float>] [--overwrite]
       (legacy preset names meeting|podcast|tutorial are still accepted as aliases)
+      NoNoiseMacCLI --aec-spike all|self|cross|format|pin|agc|tap|perf [--spike-out <dir>] [--spike-duration <sec>] [--spike-input <uid-or-name>]
+      (dev-only diagnostic mode: feasibility harness for Apple Voice Processing I/O — writes WAVs + spike-results.json to --spike-out)
+      (--aec-spike exit codes: 0 = all scenarios completed, 2 = one or more scenarios errored, 1 = the harness itself failed to start)
 
     Action verbs (send a one-shot control to the running app via URL scheme):
       toggle         Toggle Noise Cancellation
@@ -55,6 +58,13 @@ case .action(let verb):
 case .denoise(let options):
     Task {
         await runDenoise(options)
+    }
+    RunLoop.main.run()
+
+case .aecSpike(let options):
+    Task {
+        let code = await VoiceIOSpikeRunner().run(options)
+        exit(code)
     }
     RunLoop.main.run()
 

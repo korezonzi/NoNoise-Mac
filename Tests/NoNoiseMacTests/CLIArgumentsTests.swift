@@ -110,4 +110,93 @@ final class CLIArgumentsTests: XCTestCase {
             "NoNoiseMacCLI", "--denoise", "/tmp/noisy.wav", "--output", "/tmp/clean.wav", "--preset", "radio"
         ]))
     }
+
+    // MARK: - --aec-spike
+
+    func testParsesAECSpikeModeWithDefaults() throws {
+        let mode = try CLIArguments.parse(["NoNoiseMacCLI", "--aec-spike", "self"])
+        XCTAssertEqual(mode, .aecSpike(AECSpikeOptions(scenario: "self")))
+    }
+
+    func testParsesAECSpikeModeWithAllFlags() throws {
+        let mode = try CLIArguments.parse([
+            "NoNoiseMacCLI",
+            "--aec-spike", "all",
+            "--spike-out", "/tmp/spike-output",
+            "--spike-duration", "5.5",
+            "--spike-input", "MacBook Pro Microphone"
+        ])
+        XCTAssertEqual(mode, .aecSpike(AECSpikeOptions(
+            scenario: "all",
+            outputDir: "/tmp/spike-output",
+            durationSec: 5.5,
+            inputSelection: "MacBook Pro Microphone"
+        )))
+    }
+
+    func testAECSpikeScenarioIsCaseInsensitive() throws {
+        let mode = try CLIArguments.parse(["NoNoiseMacCLI", "--aec-spike", "SELF"])
+        XCTAssertEqual(mode, .aecSpike(AECSpikeOptions(scenario: "self")))
+    }
+
+    func testUnknownAECSpikeScenarioFails() {
+        XCTAssertThrowsError(try CLIArguments.parse(["NoNoiseMacCLI", "--aec-spike", "bogus"])) { error in
+            XCTAssertEqual(error as? CLIArguments.ParseError, .invalidSpikeScenario("bogus"))
+        }
+    }
+
+    func testMixedAECSpikeAndDenoiseModeFails() {
+        XCTAssertThrowsError(try CLIArguments.parse([
+            "NoNoiseMacCLI", "--aec-spike", "self", "--denoise", "/tmp/noisy.wav", "--output", "/tmp/clean.wav"
+        ])) { error in
+            XCTAssertEqual(error as? CLIArguments.ParseError, .mixedModes)
+        }
+    }
+
+    func testMixedAECSpikeAndLiveModeFails() {
+        XCTAssertThrowsError(try CLIArguments.parse([
+            "NoNoiseMacCLI", "--aec-spike", "self", "--in", "Built-in", "--out", "BlackHole"
+        ])) { error in
+            XCTAssertEqual(error as? CLIArguments.ParseError, .mixedModes)
+        }
+    }
+
+    func testAECSpikeMissingDurationValueFails() {
+        XCTAssertThrowsError(try CLIArguments.parse([
+            "NoNoiseMacCLI", "--aec-spike", "self", "--spike-duration"
+        ])) { error in
+            XCTAssertEqual(error as? CLIArguments.ParseError, .missingValue("--spike-duration"))
+        }
+    }
+
+    /// `Double("nan")`/`Double("inf")` both parse successfully in Swift, so a naive `Float(...)`
+    /// parse alone would let NaN/infinite/out-of-range durations through the CLI boundary and only
+    /// crash later (`Int(durationSec * ...)`/`UInt64(durationSec * 1_000_000_000)` traps at
+    /// runtime) deep inside `VoiceIOSpikeRunner`. All of these must be rejected right here instead.
+    func testAECSpikeDurationRejectsInvalidValues() {
+        let invalidValues = ["nan", "inf", "-5", "0", "601"]
+        for value in invalidValues {
+            XCTAssertThrowsError(try CLIArguments.parse([
+                "NoNoiseMacCLI", "--aec-spike", "self", "--spike-duration", value
+            ]), "value: \(value)") { error in
+                XCTAssertEqual(error as? CLIArguments.ParseError, .invalidFloat("--spike-duration", value), "value: \(value)")
+            }
+        }
+    }
+
+    func testMixedAECSpikeAndActionModeFails() {
+        XCTAssertThrowsError(try CLIArguments.parse([
+            "NoNoiseMacCLI", "--aec-spike", "self", "--action", "toggle"
+        ])) { error in
+            XCTAssertEqual(error as? CLIArguments.ParseError, .mixedModes)
+        }
+    }
+
+    /// `AECSpikeOptions.validScenarios` is DERIVED from `AECSpikeScenario.allCases` — this guards
+    /// against the two ever drifting apart again (e.g. a new case added to one but not the other).
+    func testAECSpikeScenarioAllCasesMatchesValidScenarios() {
+        let fromEnum = Set(AECSpikeScenario.allCases.map { $0.rawValue })
+        XCTAssertEqual(fromEnum, AECSpikeOptions.validScenarios)
+        XCTAssertEqual(fromEnum.count, AECSpikeScenario.allCases.count, "raw values must be unique")
+    }
 }
