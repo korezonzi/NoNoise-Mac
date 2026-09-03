@@ -223,12 +223,17 @@ struct ContentView: View {
             .labelsHidden()
             .pickerStyle(.segmented)
 
+            // .fixedSize(horizontal: false, vertical: true) on every caption in this card: these
+            // Japanese captions exceed the popover's 320 pt width and SwiftUI truncates them to a
+            // single "…" line without it (field report 2026-09-03).
             Text(cleanIncomingMode.caption)
                 .font(.caption2).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if let caption = cleanIncomingStatusCaption {
                 Text(caption)
                     .font(.caption2).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if isCleanIncomingCleaning {
@@ -241,6 +246,7 @@ struct ContentView: View {
             if cleanIncomingMode == .speaker, audioModel.speakerCleanupStatus == .cleaning {
                 Text("通話アプリのスピーカーに「NoNoise Speaker」を選ぶのを忘れずに")
                     .font(.caption2).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Echo guard: while cleaning, the re-render goes to the system default output. If that
@@ -254,6 +260,7 @@ struct ContentView: View {
                 voiceIOActive: audioModel.voiceProcessingStatus == .active) {
                 Text("内蔵スピーカーで再生中 — 相手にエコーが返る原因になります。イヤホンの使用を推奨（スピーカーで話すときはこの機能をオフに）")
                     .font(.caption2).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // The inverse suggestion: AEC is active and the speaker is live, but cleanup is off —
@@ -265,6 +272,7 @@ struct ContentView: View {
                 cleanupOff: !isCleanIncomingCleaning) {
                 Text("スピーカー通話中もエコーキャンセルが有効です。「相手の音声もクリアに」を ON にすると相手側のノイズも除去できます")
                     .font(.caption2).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .nnCard()
