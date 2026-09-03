@@ -18,9 +18,15 @@ let package = Package(
             name: "CTapRing",
             path: "Sources/CTapRing"
         ),
+        // Objective-C shim: catches NSExceptions from AVAudioEngine graph calls (Swift cannot).
+        // See Sources/CExceptionGuard/include/nn_exception_guard.h for the field-crash rationale.
+        .target(
+            name: "CExceptionGuard",
+            path: "Sources/CExceptionGuard"
+        ),
         .target(
             name: "Core",
-            dependencies: ["CTapRing"],
+            dependencies: ["CTapRing", "CExceptionGuard"],
             path: "Sources/Core",
             resources: [
                 .copy("../../Resources")

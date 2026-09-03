@@ -5,6 +5,7 @@ import AudioToolbox
 import CoreAudio
 import Accelerate
 import CTapRing
+import CExceptionGuard
 
 /// Raw-pointer-only render hook for the receive-cleanup engines' `.external` (VPIO-hook) playback
 /// route. Carries exactly what `VoiceIOEngine.renderCleanup` needs; the only class reference is
@@ -244,20 +245,25 @@ final class VoiceIOEngine: MicCaptureBackend {
         return buildAndStart()
     }
 
-    /// Builds the full VPIO graph (input VPIO enable → AGC off → ducking relief → ALWAYS-connected
-    /// output graph → input device pin → fixed mono 48 kHz tap → `engine.start()`) and installs the
-    /// runtime-recovery listeners. MUST be called with the engine already torn down (`teardown()`).
-    /// Every failure branch calls `teardown()`, sets `lastFailureReason`, and returns `false` — never
-    /// leaves a half-built graph or a dangling tap.
-    private func buildAndStart() -> Bool {
+    /// The graph-build stages that can fail, each mapped to its user-facing `FallbackReason`.
+    private enum BuildError: Error {
+        case voiceProcessingSetup
+        case unsupportedInputRate
+        case engineStart
+    }
+
+    /// Builds the full VPIO graph and starts the engine, or throws a `BuildError`.
+    /// MUST run inside `NNCatchNSException` (see `buildAndStart()`): AVAudioEngine graph calls
+    /// (`installTap` / `connect` / `start`) raise Objective-C NSExceptions for conditions that
+    /// cannot all be pre-validated — one aborted the whole app in the field on 2026-09-03
+    /// (`AUGraphNodeBaseV3::CreateRecordingTap`) despite the bus-rate pre-check below passing.
+    private func buildGraphAndStartEngine() throws {
         let inputNode = engine.inputNode   // first access — enable VPIO immediately after, before any
                                             // other graph construction (approved plan, Phase 2 §C).
         do {
             try inputNode.setVoiceProcessingEnabled(true)
         } catch {
-            teardown()
-            lastFailureReason = .startFailed
-            return false
+            throw BuildError.voiceProcessingSetup
         }
         // Available since macOS 10.15 (the same OS floor as `setVoiceProcessingEnabled` itself) — no
         // `#available` gate needed (confirmed against the AVFAudio SDK header, see VoiceIOSpike.swift).
@@ -289,9 +295,7 @@ final class VoiceIOEngine: MicCaptureBackend {
         // feature targets is structurally absent — `AVCaptureMicBackend` is the correct fallback).
         let busRate = inputNode.outputFormat(forBus: 0).sampleRate
         guard abs(busRate - AudioLatency.sampleRate) < Self.sampleRateToleranceHz else {
-            teardown()
-            lastFailureReason = .unsupportedInputRate
-            return false
+            throw BuildError.unsupportedInputRate
         }
 
         // Input device pin. AUTO selection already matches the system default (VPIO tracks it without
@@ -328,8 +332,37 @@ final class VoiceIOEngine: MicCaptureBackend {
         do {
             try engine.start()
         } catch {
+            throw BuildError.engineStart
+        }
+    }
+
+    /// Builds the full VPIO graph (input VPIO enable → AGC off → ducking relief → ALWAYS-connected
+    /// output graph → input device pin → fixed mono 48 kHz tap → `engine.start()`) and installs the
+    /// runtime-recovery listeners. MUST be called with the engine already torn down (`teardown()`).
+    /// Every failure branch — including an Objective-C NSException raised anywhere inside the
+    /// AVAudioEngine graph calls — calls `teardown()`, sets `lastFailureReason`, and returns `false`:
+    /// a beta capture backend degrades to the AVCapture fallback, it never takes down the app
+    /// (field crash 2026-09-03: an uncaught `CreateRecordingTap` exception killed the process, which
+    /// also silenced everything routed through NoNoise Speaker).
+    private func buildAndStart() -> Bool {
+        var buildError: BuildError?
+        let exceptionDescription = NNCatchNSException {
+            do {
+                try self.buildGraphAndStartEngine()
+            } catch let error as BuildError {
+                buildError = error
+            } catch {
+                buildError = .engineStart
+            }
+        }
+
+        if exceptionDescription != nil || buildError != nil {
             teardown()
-            lastFailureReason = .startFailed
+            if let exceptionDescription {
+                // Main thread (never the render/tap thread) — low-frequency event logging is allowed.
+                AudioModel.routeLog.error("VoiceIOEngine build raised NSException, falling back: \(exceptionDescription, privacy: .public)")
+            }
+            lastFailureReason = (buildError == .unsupportedInputRate) ? .unsupportedInputRate : .startFailed
             return false
         }
 
