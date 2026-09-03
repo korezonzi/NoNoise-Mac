@@ -56,6 +56,7 @@ struct GeneralSettingsView: View {
                 profilesCard
                 gainCard
                 incomingCard
+                voiceProcessingCard
                 loudnessCard
                 resetCard
                 footer
@@ -493,6 +494,61 @@ struct GeneralSettingsView: View {
         switch audioModel.incomingCleanupStatus {
         case .failed: return .orange
         default:      return .secondary
+        }
+    }
+
+    // MARK: Experimental — Voice Processing I/O (VPIO) capture backend
+
+    private var voiceProcessingCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionHeader("実験的機能", systemImage: "flask")
+
+            Toggle(isOn: $audioModel.voiceProcessingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("エコーキャンセル付きマイク取り込み（ベータ）").font(.subheadline)
+                    Text("Appleのボイスプロセッシングでマイク取り込みを行い、内蔵スピーカーで通話しても自分の再生音がハウリングとして相手に返るのを防ぎます。")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+
+            if let caption = voiceProcessingStatusCaption {
+                Label(caption, systemImage: voiceProcessingStatusIcon)
+                    .font(.caption).foregroundColor(voiceProcessingStatusColor)
+            }
+        }
+        .nnCard()
+    }
+
+    /// Status line driven by the never-lying `voiceProcessingStatus` (not the raw persisted flag).
+    /// `.fallback` captions are differentiated by reason (review fix L2) so the user understands
+    /// WHY VPIO isn't active, rather than a single generic "従来方式で動作中".
+    private var voiceProcessingStatusCaption: String? {
+        switch audioModel.voiceProcessingStatus {
+        case .off:      return nil
+        case .active:   return "AEC有効 — スピーカー通話でも自分の再生音を打ち消します"
+        case .fallback(.inputPinFailed):
+            return "選択したマイクを使用できないため従来方式で動作中"
+        case .fallback(.unsupportedInputRate):
+            return "このマイクの形式では AEC を利用できません（従来方式で動作中）"
+        case .fallback(.startFailed), .fallback(.runtimeRestartExhausted):
+            return "この構成では従来方式で動作中"
+        case .failed:   return "開始できませんでした" + (audioModel.errorMessage.map { " — \($0)" } ?? "")
+        }
+    }
+
+    private var voiceProcessingStatusIcon: String {
+        switch audioModel.voiceProcessingStatus {
+        case .active:            return "checkmark.circle.fill"
+        case .fallback, .failed: return "exclamationmark.triangle.fill"
+        case .off:                return "info.circle"
+        }
+    }
+
+    private var voiceProcessingStatusColor: Color {
+        switch audioModel.voiceProcessingStatus {
+        case .fallback, .failed: return .orange
+        default:                 return .secondary
         }
     }
 

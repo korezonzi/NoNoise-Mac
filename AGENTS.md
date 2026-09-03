@@ -26,14 +26,32 @@ cable so any app (Zoom, Meet, Discord, OBS, …) receives studio-clean audio.
   - `MicCaptureBackend` — protocol for a single mic-capture producer (`configure(deviceUID:) ->
     Bool`, `start()`/`stop()`/`isRunning`, an `onAudio` callback) plus `MicDevice` (the pure
     uid/name value type `AudioModel.inputDevices` is made of). Injected into `AudioModel.init(micBackend:)`
-    (defaults to `AVCaptureMicBackend()`, so existing call sites are unaffected) so a second,
-    Apple-Voice-Processing-I/O-based backend can be added later without touching `AudioModel`.
+    (defaults to `AVCaptureMicBackend()`, so existing call sites are unaffected). Two implementations
+    exist: `AVCaptureMicBackend` (always available, the fallback) and `VoiceIOEngine` (Apple Voice
+    Processing I/O, gated behind `mv.voiceProcessing` — see "Voice Processing I/O (VPIO)" below).
+    `AudioModel` holds BOTH (`avCaptureBackend: MicCaptureBackend` + `voiceIOEngine: VoiceIOEngine?`)
+    and routes `ingest()` through whichever is `currentBackend` — exactly one is ever wired to
+    `onAudio` at a time (the `t*` telemetry scalars assume a single producer).
   - `AVCaptureMicBackend` — the `MicCaptureBackend` built on `AVCaptureSession` +
     `AVCaptureAudioDataOutput`; the `AVCaptureAudioDataOutputSampleBufferDelegate` conformance and
     the CMSampleBuffer → 48 kHz mono `AVAudioConverter` pipeline live here (moved out of
     `AudioModel`), including the render-callback-adjacent `configure`/`start`/`stop` contract:
     `configure` returns `true` only if an input was actually attached (device resolved AND the
     session accepted it), so a failed configure never reaches `start()`.
+  - `AudioProcessing/VoiceIOEngine` — the `MicCaptureBackend` built on Apple Voice Processing I/O
+    (`inputNode.setVoiceProcessingEnabled(true)`), an app-side AEC fix for the built-in-speaker echo
+    problem. ALSO owns a paired playback graph (VPIO's echo canceller only references audio this
+    process plays through its own output bus) that `IncomingCleanupEngine`/`SpeakerCleanupEngine` can
+    hook into via `restart(withHook:owner:)`. See "Voice Processing I/O (VPIO)" below for the full
+    contract (hook lifecycle, no output-device pin, fixed-format tap, runtime recovery).
+  - `AudioProcessing/VoiceIOLogic` — pure, headless-tested decisions for VPIO: `VoiceIOStatus` +
+    `FallbackReason` (the UI-facing effective-state enums), `CleanupPlaybackRoute`/
+    `CleanupPlaybackTarget` (own-engine vs VPIO-hook playback routing), `CleanupRouteTransition.plan`
+    (the ordered mutation list — `RouteMutation` — for moving a cleanup engine between routes, or
+    tearing it down), `cleanupRoute`/`effectiveStatus`/`inputPinFailureReason`/`startFailureAction`.
+  - `AudioProcessing/MicFormatNormalizer` — per-tap-buffer format VALIDATION (mono/48 kHz, matching
+    the tap's own fixed format) for `VoiceIOEngine`. No resampling: a non-48k input bus abandons VPIO
+    entirely (see below) rather than converting.
   - `AudioLatency` — the pipeline's fixed sample rate (48 kHz) and latency budget (ring-buffer
     target + one STFT hop) as named constants, shared by `AudioModel`'s render callback,
     `AVCaptureMicBackend`'s capture-side target format, and `IncomingCleanupEngine`/
@@ -41,7 +59,7 @@ cable so any app (Zoom, Meet, Discord, OBS, …) receives studio-clean audio.
   - `AudioProcessing/DeepFilterNetDSP` — STFT → DeepFilterNet feature pipeline → CoreML call → ISTFT → wet/dry blend.
   - `AudioProcessing/DeepFilterNet3_Streaming` — generated CoreML model wrapper.
   - `AudioProcessing/VoiceChain` + `Biquad` + `Dynamics` — post-DSP "voice polish" (high-pass → shelves → compressor → limiter) plus the optional **Broadcast Voice** clarity stages (presence peaking bell → subtractive `DeEsser`) and optional **Mouth Noise** finisher stages (subtractive `DePlosive` → broadband-gate `DeClick`). Driven by `ClarityLevel` + `MouthNoiseLevel`, each is gated independently of the noise preset.
-  - `AudioProcessing/IncomingCleanupEngine` — a SECOND, independent capture→clean→play pipeline ("clean the other side"), **macOS 14.4+**. Captures **all system audio except NoNoise** via a Core Audio **process tap** (no BlackHole/loopback), runs its OWN `DeepFilterNetDSP` instance (DFN only — **no** `VoiceChain`), and re-renders the cleaned audio to the **current default output** (auto-following device changes; tapped originals muted). NOT an `AudioModel` (no mic coupling, no auto-route to the NoNoise Mic sink). Held by `AudioModel` as an OPTIONAL (stored `AnyObject?`, gated type) created ONLY while enabled. The tap IOProc → `AVAudioSourceNode` are bridged by the lock-free `TapAudioRing` / `CTapRing` SPSC ring. See "Incoming / guest cleanup" below.
+  - `AudioProcessing/IncomingCleanupEngine` — a SECOND, independent capture→clean→play pipeline ("clean the other side"), **macOS 14.4+**. Captures **all system audio except NoNoise** via a Core Audio **process tap** (no BlackHole/loopback), runs its OWN `DeepFilterNetDSP` instance (DFN only — **no** `VoiceChain`), and re-renders the cleaned audio to the **current default output** (auto-following device changes; tapped originals muted). NOT an `AudioModel` (no mic coupling, no auto-route to the NoNoise Mic sink). Held by `AudioModel` as an OPTIONAL (stored `AnyObject?`, gated type) created ONLY while enabled. The tap IOProc → `AVAudioSourceNode` are bridged by the lock-free `TapAudioRing` / `CTapRing` SPSC ring. Built with a `CleanupPlaybackTarget` (`.ownEngine`, the default, OR `.external` when VPIO owns playback — see "Voice Processing I/O (VPIO)" below). See "Incoming / guest cleanup" below.
   - `AudioProcessing/TapAudioRing` + `Sources/CTapRing` (`tap_ring.{c,h}`) — a lock-free C11-atomics single-producer/single-consumer float FIFO bridging the two realtime threads of the tap-based incoming path. Mirrors the driver's tested `nn_ring` acquire/release discipline.
   - `AudioProcessing/IncomingTapLogic` — pure, headless-tested decisions for the incoming path (own-process-object validity, re-pin-vs-rebuild) + the `IncomingCleanupStatus` enum the UI binds to.
   - `AudioProcessing/RingBuffer`, `SpecHistoryRingBuffer`, `AudioUtils` — buffers + helpers.
@@ -374,12 +392,87 @@ Do not add entitlements beyond these two without a measured, documented need.
 - **What:** a SECOND, independent capture→clean→play pipeline that de-noises the audio the user *hears* (noisy guests/callers). It captures **all system audio EXCEPT NoNoise's own process** via a **Core Audio process tap** (`CATapDescription(stereoGlobalTapButExcludeProcesses:)` + a private aggregate device + an `AudioDeviceIOProcID`) — **no BlackHole, no loopback device, no manual routing**. It runs its OWN `DeepFilterNetDSP` (DFN only — **no** `VoiceChain`) and re-renders the cleaned result to the **current default output**, auto-following device changes. The tapped originals are **muted** (`desc.muteBehavior = .muted`), so the user hears only NoNoise's cleaned playback. It is **not** an `AudioModel` and never touches the mic path or the NoNoise Mic sink. **A SINGLE toggle** — no source/monitor pickers.
 - **macOS 14.4+ only; the whole type is `@available(macOS 14.4, *)`.** 14.4 is the explicit product floor even though the underlying symbols are older (tap C API 14.2, `CATapDescription` init 14.0); we call the **C** `AudioHardwareCreateProcessTap` (NOT the macOS-15 `AudioHardwareTap` Swift overlay), and every tap call sits behind `#available(macOS 14.4, *)` so the package still compiles against its `.macOS(.v13)` deployment target. `AudioModel` stores the engine as `AnyObject?` so it needn't itself be gated; it only ever constructs/casts `IncomingCleanupEngine` inside `#available` blocks.
 - **Two realtime threads bridged by a LOCK-FREE SPSC ring — never a locking `RingBuffer`.** The tap IOProc (producer, HAL realtime IO thread) and the `AVAudioSourceNode` render block (consumer, audio render thread) are BOTH realtime; a lock between them risks priority inversion / dropouts. They are bridged by `TapAudioRing` (Swift owner) over the C `tap_ring` (`Sources/CTapRing`) — a C11-atomics acquire/release SPSC float FIFO that mirrors the driver's tested `nn_ring` discipline (C target because `Atomic`/`Synchronization` need macOS 15). Both callbacks are **allocation/lock/syscall-free** and treat the HAL input buffers as **read-only**: the IOProc reads the tapped frames, does a `vDSP` N→mono downmix into a **pre-allocated** scratch, and writes the mono result to the ring; the render block drains the ring (latency-trim via `tap_ring_drop`), runs DFN in place, and fills silence on underflow.
-- **Off by default + lazy lifecycle (zero-cost when off):** `AudioModel` holds it as an OPTIONAL (`AnyObject?`, never a stored `let`). `applyIncomingCleanup()` CREATES it only on the enabled transition (supported OS + toggle on) and releases it to `nil` when disabled/unavailable. Rationale: `DeepFilterNetDSP.init()` allocates ML buffers + async-loads the CoreML model — it must NOT run at launch. Each fresh engine instance gets its OWN DeepFilterNet recurrent state (correct — a new stream starts clean).
-- **`start() -> Bool` is truthful; the owner retains ONLY a genuinely-running engine.** Build order: resolve our own audio process object (**HARD-FAIL** if invalid — a global-exclude tap built around an unknown own-process id would exclude *nothing* and re-capture/mute our own cleaned playback) → create the muted tap → create the private aggregate (`tapautostart=true`, pinned to 48 kHz) → read the tap `AudioStreamBasicDescription` ONCE → create the IOProc → start the playback engine FIRST → `AudioDeviceStart` LAST (so the global mute only engages once our re-render is already playing). Any failure runs `stop()` and returns `false`. `applyIncomingCleanup()` assigns `incomingEngine` ONLY when `start()` returns `true` (else `nil` + `.failed`).
+- **Off by default + lazy lifecycle (zero-cost when off):** `AudioModel` holds it as an OPTIONAL (`AnyObject?`, never a stored `let`). `AudioModel.reconcileIncomingCleanup(desiredTarget:)` (called from `applyCleanupPlaybackRoute()`) CREATES it only on the enabled transition (supported OS + toggle on) and releases it to `nil` when disabled/unavailable. Rationale: `DeepFilterNetDSP.init()` allocates ML buffers + async-loads the CoreML model — it must NOT run at launch. Each fresh engine instance gets its OWN DeepFilterNet recurrent state (correct — a new stream starts clean).
+- **`start() -> Bool` is truthful; the owner retains ONLY a genuinely-running engine.** Build order (composite of `prepareCapture()` + `startPlayback()` + `startIO()` — see the `.external` split below): resolve our own audio process object (**HARD-FAIL** if invalid — a global-exclude tap built around an unknown own-process id would exclude *nothing* and re-capture/mute our own cleaned playback) → create the muted tap → create the private aggregate (`tapautostart=true`, pinned to 48 kHz) → read the tap `AudioStreamBasicDescription` ONCE → create the IOProc → start the playback engine FIRST → `AudioDeviceStart` LAST (so the global mute only engages once our re-render is already playing). Any failure runs `stop()` and returns `false`. `AudioModel` assigns `incomingEngine` ONLY when the build succeeds (else `nil` + `.failed`).
+- **`.external` playback route (VPIO-hook — see "Voice Processing I/O (VPIO)" below):** `IncomingCleanupEngine(playbackTarget: .external)` skips the playback graph/listeners entirely — `prepareCapture()` builds ONLY the tap+aggregate+IOProc (plus an `.external`-only default-output HEALTH listener, `checkExternalHealth()`, since this mode has no playback graph of its own to repin), `makeRenderHook()` exposes a `CleanupRenderHook` (raw ring/dsp pointers), and `startIO()` starts the aggregate's IO separately — so `AudioModel` can sequence "hand the hook to `VoiceIOEngine` and confirm it's rendering" BEFORE "start the tap's mute" (the mute-order invariant `CleanupRouteTransition.plan` encodes as `.attachHook` before `.startIO`).
 - **Single idempotent teardown (`stop()`), MUST run on every failure path:** stop IO → destroy IOProc → destroy aggregate → destroy tap → remove the default-output HAL listener → remove the `AVAudioEngineConfigurationChange` observer → stop+reset the playback engine. Each handle is guarded + zeroed so a second call is a no-op. **A leaked *muted* tap keeps OTHER apps muted system-wide**, so teardown is mandatory on all paths (and on `deinit`).
 - **Default-output follow (re-pin vs rebuild):** a `kAudioHardwarePropertyDefaultOutputDevice` HAL listener + an `AVAudioEngineConfigurationChange` observer (both on `.main`) call `repinPlayback()`, which **re-pins** the playback output unit to the new default (cheap, bumpless) UNLESS the tap/aggregate itself died (then full `stop()` + `start()`). The re-pin-vs-rebuild decision is the pure, unit-tested `IncomingTapLogic.repinDecision(tapAlive:)`. `repinToDefaultOutput()` is a no-op when the default hasn't changed (breaks the set-CurrentDevice → config-change → re-pin feedback cycle). `refreshDevicesAfterHardwareChange()` does **not** re-apply the engine (the tap captures all-system-minus-NoNoise and follows the default output itself).
 - **Canonical effective status — never a lying toggle.** The UI binds to `AudioModel.incomingCleanupStatus` (`IncomingCleanupStatus`: `.unavailable` / `.off` / `.cleaning` / `.failed`), NOT the raw persisted flag, because `start()` can fail (TCC denied, own-process unresolved, tap/aggregate creation failed) and the owner then retains NO engine. `.unavailable` (OS < 14.4) disables the toggle; `.failed` keeps the toggle on so granting audio-capture permission + re-toggling retries. `isIncomingCleanupAvailable` = `#available(macOS 14.4, *)`.
 - **DFN-only:** the incoming path runs DeepFilterNet **only** — no `VoiceChain`/Broadcast Voice (that polish is voice-shaping for the *outgoing* mic, inappropriate for arbitrary guest audio).
 - **Pure, headless-tested logic** (kept OUT of the `@available` engine, mirroring the project's "risky logic in tested statics" rule): the own-process-object validity predicate (`IncomingTapLogic.isValidProcessObject`), the re-pin-vs-rebuild decision, and the lock-free ring's wrap/fill/drain/underflow/overflow math (`TapAudioRingTests`, `IncomingTapLogicTests`). The tap/aggregate/IOProc path itself is integration-only (needs a 14.4+ host + granted TCC) → manual smoke test.
 - **TCC:** process taps require audio-capture consent. `Resources/Info.plist` carries **`NSAudioCaptureUsageDescription`** (a usage-description string, **not** a new entitlement — the two-entitlement policy still holds). There is no public API to pre-check/request it; the system prompt fires on first tap use.
-- **Persistence:** only `mv.incomingEnabled` (off by default). The old `mv.incomingSourceUID` / `mv.incomingOutputUID` keys, the source/monitor pickers, `fetchIncomingDevices`, the `monitorOutput*`/`incomingSource*` maps, and `VirtualMicRouting.isSelectableIncomingSource`/`isSelectableMonitorOutput` + `DeviceInfo.hasInput`/`transportType` are **removed**. Re-applied via `applyIncomingCleanup()` after `loadSettings()`.
+- **Persistence:** only `mv.incomingEnabled` (off by default). The old `mv.incomingSourceUID` / `mv.incomingOutputUID` keys, the source/monitor pickers, `fetchIncomingDevices`, the `monitorOutput*`/`incomingSource*` maps, and `VirtualMicRouting.isSelectableIncomingSource`/`isSelectableMonitorOutput` + `DeviceInfo.hasInput`/`transportType` are **removed**. Re-applied via `applyCleanupPlaybackRoute()` after `loadSettings()`.
+
+## Voice Processing I/O (VPIO) — `VoiceIOEngine`, `mv.voiceProcessing` (experimental, off by default)
+
+- **What:** an app-side root fix for the built-in-speaker echo problem (see
+  `docs/knowledge/knowledge1.md` 2026-09-01/09-02 entries): moves mic capture onto Apple **Voice
+  Processing I/O** (`AVAudioEngine.inputNode.setVoiceProcessingEnabled(true)`), whose echo canceller
+  references audio THIS process plays through its own paired output bus. `IncomingCleanupEngine`/
+  `SpeakerCleanupEngine` hook their cleaned re-render into that bus instead of their own
+  `AVAudioEngine` — so Apple's AEC cancels NoNoise's own playback from the mic it's about to
+  re-capture, fixing the speaker-echo case entirely on-device (no cloud AEC, no WebRTC dependency).
+  A SECOND `MicCaptureBackend` alongside `AVCaptureMicBackend`; `AudioModel` falls back to
+  `AVCaptureMicBackend` on ANY VPIO failure (never leaves capture dead).
+- **Flag-gated, lazy, truthful:** `AudioModel.voiceProcessingEnabled` (`mv.voiceProcessing`, default
+  **false**) is the only thing that constructs a `VoiceIOEngine` — `applyMicBackend()` is the sole
+  construction site (verify with `grep VoiceIOEngine(` — exactly one call site). The UI binds to
+  `AudioModel.voiceProcessingStatus` (`VoiceIOLogic.VoiceIOStatus`: `.off` / `.active` /
+  `.fallback(FallbackReason)` / `.failed`), never the raw flag — a `.fallback` means `AudioModel` has
+  already switched `currentBackend` back to `AVCaptureMicBackend`; the reason
+  (`.startFailed` / `.inputPinFailed` / `.unsupportedInputRate` / `.runtimeRestartExhausted`) drives a
+  differentiated Settings caption.
+- **No output-device pin (real-hardware finding):** on real VPIO hardware, `inputNode.audioUnit` and
+  `outputNode.audioUnit` are the SAME underlying duplex Audio Unit. Pinning the output side after the
+  input pin silently OVERWRITES it, pointing the whole duplex unit at the output device (typically
+  the built-in speaker, zero input channels) — capture goes dead. `VoiceIOEngine` pins ONLY the
+  input; output simply follows the engine's own default output, and a default-output change is
+  caught by the existing `installDefaultOutputListener()` → full rebuild.
+- **Fixed mono/48 kHz tap, NO resampling.** `buildAndStart()` verifies `inputNode.outputFormat(forBus:
+  0).sampleRate` is genuinely ~48 kHz BEFORE ever installing a tap; a non-48k bus (some BT headsets
+  force VPIO to 16/24 kHz) abandons VPIO outright via `FallbackReason.unsupportedInputRate` rather
+  than resampling — a BT headset is earphones, which have no acoustic loop to begin with, so the
+  echo problem this feature targets is already structurally absent for it.
+  `installTap` always uses the fixed `AudioUtils.shared.processingFormat` (mono/48 kHz), matching the
+  proven `--aec-spike` harness exactly; `MicFormatNormalizer` only VALIDATES each buffer's format
+  (never converts) and reports `onInvalidBuffer` (→ `onRuntimeFailure`) rather than silently dropping
+  or mis-processing a malformed buffer.
+- **Input device pin: uninit→set→init cycle, gated on manual selection.** Pinning
+  `kAudioOutputUnitProperty_CurrentDevice` after `engine.prepare()` needs
+  `AudioUnitUninitialize` → `AudioUnitSetProperty` → `AudioUnitInitialize` (a bare `Set` fails with
+  -10849). Only attempted when `isManualDeviceSelection` is true (set by `AudioModel` from
+  `inputDeviceSelection != .autoInputSelection`, NOT from the resolved UID string `configure(deviceUID:)`
+  receives — that's always a concrete UID, never the literal "auto" sentinel, so comparing it to the
+  sentinel would never actually skip the pin). A failed MANUAL pin surfaces
+  `.fallback(.inputPinFailed)` and `AudioModel` ACTUALLY switches capture to `AVCaptureMicBackend`
+  (not just the status label — a pin failure means VPIO would silently capture the wrong device).
+- **Hook lifecycle — the ONLY hook-swap path is `restart(withHook:owner:)`.** `hookBox`
+  (`UnsafeMutablePointer<CleanupRenderHook?>`) is written ONLY while the engine is stopped, so the
+  realtime render callback never races a write. `owner: AnyObject?` is retained STRONGLY alongside
+  the hook (`hookOwner`) for as long as it's wired — this keeps the hook-owning cleanup engine ALIVE
+  even if `AudioModel` drops its own reference first, closing a use-after-free hazard. `detachHook()`
+  (stop-if-running-then-clear, or clear-directly-if-already-stopped) is the mandatory first step
+  before releasing any hook-owning engine — `AudioModel.releaseIncomingEngine()`/
+  `releaseSpeakerEngine()` are the ONLY places `incomingEngine`/`speakerEngine` are set to `nil`, and
+  both detach first.
+- **Cleanup-engine route transitions are PLANNED, not hand-rolled.** `VoiceIOLogic.CleanupRouteTransition.plan(from:to:)`
+  is the pure, headless-tested (see `VoiceIOLogicTests`) ordering: a hook is ALWAYS detached before
+  its owning engine is stopped, and a NEW hook is ALWAYS confirmed attached (`.attachHook`) before
+  the new engine's IO — and thus its tap mute — starts (`.startIO`). `AudioModel.executeCleanupRouteTransition`
+  interprets this list against `IncomingCleanupEngine`/`SpeakerCleanupEngine` through one shared
+  `CleanupEngineLifecycle` protocol (file-scope `private` in `AudioModel.swift`, conformances declared
+  there too since it's an orchestration concern, not a property of the engines) — so both engines
+  share ONE execution path instead of two hand-written, easy-to-desync copies. A route switch (or a
+  fresh enable while VPIO is already active) builds DIRECTLY in the target mode — never
+  `.ownEngine`-then-rebuild-to-`.external`.
+- **Runtime health checks, both directions.** `VoiceIOEngine.scheduleRestart()` bails immediately if
+  `engine.isRunning` (macOS can re-deliver a config-change/default-output notification for a change
+  that never actually stopped it, or that a previous restart already fixed — without this guard every
+  such self-induced callback resets the backoff, defeating it; mirrors the 2026-08-30 [GOTCHA] rule
+  for the main playback engine). Conversely, a hook-owning (`.external`) cleanup engine installs its
+  OWN default-output health listener (`checkExternalHealth()`, reusing `IncomingTapLogic.repinDecision`
+  as a plain `tapAlive`→`.repin`/`.rebuild` check) since it has no playback graph of its own to repin;
+  and `VoiceIOEngine.onRebuilt` fires after every successful rebuild so `AudioModel` can
+  re-verify a hook-owning cleanup engine's capture side didn't die alongside it.
+- **Persistence:** only `mv.voiceProcessing` (off by default, in `SettingsResetPolicy.resettableKeys`).
+  Not part of `VoiceProfile` (device/hardware-dependent, not a "voice" setting).

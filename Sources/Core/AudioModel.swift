@@ -7,6 +7,27 @@ import CoreAudio
 import Accelerate
 import os
 
+/// Common lifecycle shape shared by `IncomingCleanupEngine` and `SpeakerCleanupEngine` — lets
+/// `AudioModel.executeCleanupRouteTransition` interpret ONE `CleanupRouteTransition.plan(...)` for
+/// both instead of duplicating the interpreter. Intentionally minimal: only what the interpreter
+/// needs. File-scope `private` (equivalent to `fileprivate` at this scope) so the conformance
+/// extensions below — declared here rather than in each engine's own file, since this protocol is an
+/// `AudioModel`-orchestration concern, not a property of the engines themselves — can see it.
+private protocol CleanupEngineLifecycle: AnyObject {
+    var playbackTarget: CleanupPlaybackTarget { get }
+    var onRuntimeFailure: (() -> Void)? { get set }
+    @discardableResult func start() -> Bool
+    @discardableResult func prepareCapture() -> Bool
+    @discardableResult func startIO() -> Bool
+    func makeRenderHook() -> CleanupRenderHook?
+    func stop()
+}
+
+@available(macOS 14.4, *)
+extension IncomingCleanupEngine: CleanupEngineLifecycle {}
+
+extension SpeakerCleanupEngine: CleanupEngineLifecycle {}
+
 public class AudioModel: NSObject, ObservableObject {
     /// Route/lifecycle diagnostics — the permanent replacement for the temporary DIAG stderr
     /// logging (330280c). Queryable after the fact via
@@ -88,8 +109,11 @@ public class AudioModel: NSObject, ObservableObject {
                 speakerCleanupEnabled = false
                 isApplyingMutualExclusion = false
             }
-            applyIncomingCleanup()
             persistIncomingSettings()
+            // Single reconcile entry point (review fix M7): computes the target route FIRST
+            // (VoiceIOLogic.cleanupRoute) and builds/tears down directly in that mode — never
+            // `.ownEngine`-then-rebuild-to-`.external`.
+            applyCleanupPlaybackRoute()
         }
     }
     /// Effective, never-lying state for the UI: `start()` can fail (TCC denied, own-process
@@ -117,8 +141,10 @@ public class AudioModel: NSObject, ObservableObject {
                 incomingCleanupEnabled = false
                 isApplyingMutualExclusion = false
             }
-            applySpeakerCleanup()
             persistSpeakerSettings()
+            // Single reconcile entry point (review fix M7) — see the analogous comment on
+            // `incomingCleanupEnabled`'s didSet.
+            applyCleanupPlaybackRoute()
         }
     }
     /// Effective, never-lying state for the UI — mirrors `incomingCleanupStatus`.
@@ -133,6 +159,25 @@ public class AudioModel: NSObject, ObservableObject {
     /// Reentrancy guard for the Incoming ⇄ Speaker Cleanup mutual-exclusion cascade above — prevents
     /// the forced-off write on one toggle from re-triggering the other's own forcing logic.
     private var isApplyingMutualExclusion = false
+
+    // Voice Processing I/O (VPIO) capture backend — an app-side AEC fix for the built-in-speaker echo
+    // problem (see docs/knowledge/knowledge1.md 2026-09-02 [DECISION]). OFF by default: `VoiceIOEngine`
+    // is constructed ONLY while this is true (`applyMicBackend`), so a disabled/never-touched flag
+    // means `currentBackend` stays `avCaptureBackend` and this feature's code paths never run — the
+    // Phase 2 acceptance bar (byte-for-byte unchanged behavior with the flag off).
+    @Published public var voiceProcessingEnabled: Bool = false {
+        didSet {
+            guard !isApplyingPreset else { return }
+            guard voiceProcessingEnabled != oldValue else { return }
+            UserDefaults.standard.set(voiceProcessingEnabled, forKey: PrefKey.voiceProcessing)
+            applyMicBackend()
+        }
+    }
+    /// Effective, never-lying state for the UI — mirrors `incomingCleanupStatus`/`speakerCleanupStatus`:
+    /// `VoiceIOEngine` can fail to start or fall back mid-session, and the toggle must reflect that
+    /// rather than claim VPIO is active when `AudioModel` has silently switched back to
+    /// `AVCaptureMicBackend`.
+    @Published public private(set) var voiceProcessingStatus: VoiceIOStatus = .off
 
     // On-demand capture: when the virtual mic is installed we capture the real mic ONLY while a
     // consumer app is using "NoNoise Mic" (observed via kAudioDevicePropertyDeviceIsRunningSomewhere).
@@ -374,6 +419,7 @@ public class AudioModel: NSObject, ObservableObject {
         static let loudnessNorm = SettingsResetPolicy.loudnessNormKey
         static let loudnessTarget = SettingsResetPolicy.loudnessTargetKey
         static let inputDevice = SettingsResetPolicy.inputDeviceKey
+        static let voiceProcessing = SettingsResetPolicy.voiceProcessingKey
     }
 
     public struct DeviceStruct: Identifiable {
@@ -381,11 +427,17 @@ public class AudioModel: NSObject, ObservableObject {
         public let name: String
     }
     
-    // Capture (Input) — behind the MicCaptureBackend protocol so Phase 2 (Apple Voice Processing
-    // I/O) can add a second backend without changing this class's logic. Injected via init() (see
-    // below) so a fake backend can be substituted; production call sites are unaffected by the
-    // default argument.
-    private let micBackend: MicCaptureBackend
+    // Capture (Input) — behind the MicCaptureBackend protocol. `avCaptureBackend` is the
+    // always-available fallback (injected via init(), see below, so a fake backend can be
+    // substituted; production call sites are unaffected by the default argument). `voiceIOEngine` is
+    // the OPTIONAL Phase 2 Voice Processing I/O backend — constructed ONLY while
+    // `voiceProcessingEnabled` is true (`applyMicBackend`), same zero-cost-when-off rule as
+    // `incomingEngine`/`speakerEngine`. `currentBackend` is whichever of the two is actively wired to
+    // `ingest()` right now; exactly ONE backend is ever active (the `t*` telemetry scalars assume a
+    // single producer).
+    private let avCaptureBackend: MicCaptureBackend
+    private var voiceIOEngine: VoiceIOEngine?
+    private var currentBackend: MicCaptureBackend
 
     // Playback (Output)
     private let engine = AVAudioEngine()
@@ -407,14 +459,14 @@ public class AudioModel: NSObject, ObservableObject {
     // OPTIONAL — created only while the feature is enabled (the tap engine allocates MLMultiArrays +
     // async-loads the model; a resident instance would break zero-cost-when-off). Stored as
     // `AnyObject?` so AudioModel itself needn't be `@available(macOS 14.4,*)`: `IncomingCleanupEngine`
-    // is gated and only ever constructed/cast inside `#available` blocks (see `applyIncomingCleanup`).
+    // is gated and only ever constructed/cast inside `#available` blocks (see `reconcileIncomingCleanup`).
     private var incomingEngine: AnyObject?
 
     // OPTIONAL — created only while Speaker Cleanup is enabled (same zero-cost-when-off rationale as
     // `incomingEngine`). `SpeakerCleanupEngine` uses no macOS-14.4-only API, so unlike `incomingEngine`
     // this is stored as its concrete type — no `AnyObject?` / `#available` indirection needed.
     private var speakerEngine: SpeakerCleanupEngine?
-    // Invalidates deferred speaker-engine starts (see applySpeakerCleanup's run-loop-tick defer).
+    // Invalidates deferred speaker-engine builds (see reconcileSpeakerCleanup's run-loop-tick defer).
     private var speakerApplyGeneration: UInt64 = 0
 
     /// - Parameter micBackend: The mic-capture backend to use. Defaults to `AVCaptureMicBackend()`
@@ -423,7 +475,8 @@ public class AudioModel: NSObject, ObservableObject {
     ///   still cannot be constructed headlessly (this initializer also starts CoreAudio/AVFoundation
     ///   listeners — see AGENTS.md's note on `applyProfile`).
     public init(micBackend: MicCaptureBackend = AVCaptureMicBackend()) {
-        self.micBackend = micBackend
+        self.avCaptureBackend = micBackend
+        self.currentBackend = micBackend
         super.init()
 
         let bufferRef = ringBuffer
@@ -473,11 +526,9 @@ public class AudioModel: NSObject, ObservableObject {
             return noErr
         }
         
-        // Wire the active mic backend's output into ingest() (raw ring buffer + telemetry).
+        // Wire the initial (AVCapture) backend's output into ingest() (raw ring buffer + telemetry).
         // Runs on the backend's own non-realtime capture queue — never the render thread.
-        micBackend.onAudio = { [weak self] floatData, count in
-            self?.ingest(floatData, count: count)
-        }
+        wireOnAudio(avCaptureBackend)
 
         checkPermissions()
         fetchInputDevices()
@@ -726,6 +777,7 @@ public class AudioModel: NSObject, ObservableObject {
         loudnessNormEnabled = false
         loudnessTargetLUFS = -14
         inputDeviceSelection = VirtualMicRouting.autoInputSelection
+        voiceProcessingEnabled = false
         isApplyingPreset = false
         syncAutoState(for: .auto)   // direct assignment above bypasses applyPreset's own call
 
@@ -737,12 +789,13 @@ public class AudioModel: NSObject, ObservableObject {
         dspEngine.outputGain = outputGainValue
 
         applyVoiceChain()
-        applyIncomingCleanup()
-        applySpeakerCleanup()
-        applyInputSelection()   // inputDeviceSelection.didSet was suppressed above (isApplyingPreset)
+        applyMicBackend()          // voiceProcessingEnabled.didSet was suppressed above (isApplyingPreset)
+        applyCleanupPlaybackRoute() // reconciles Incoming + Speaker together (single entry point)
+        applyInputSelection()      // inputDeviceSelection.didSet was suppressed above (isApplyingPreset)
         persistSettings()
         persistIncomingSettings()
         persistSpeakerSettings()
+        UserDefaults.standard.set(voiceProcessingEnabled, forKey: PrefKey.voiceProcessing)
     }
 
     private func loadSettings() {
@@ -770,8 +823,8 @@ public class AudioModel: NSObject, ObservableObject {
             inputVolumeValue = SmartLevelController.defaultInputVolume
             applyPreset(.auto)
             applyVoiceChain()
-            applyIncomingCleanup()   // feature off on first launch; sets status (.off or .unavailable)
-            applySpeakerCleanup()    // feature off on first launch; sets status (.off or .unavailable)
+            applyMicBackend()           // feature off on first launch; a true no-op (see applyMicBackend)
+            applyCleanupPlaybackRoute() // feature off on first launch; sets status (.off or .unavailable)
             return
         }
         // Load stored knob values (used as-is for .custom; overwritten below for
@@ -793,19 +846,23 @@ public class AudioModel: NSObject, ObservableObject {
         loudnessTargetLUFS  = d.object(forKey: PrefKey.loudnessTarget) != nil
             ? d.float(forKey: PrefKey.loudnessTarget) : -14
         // Incoming / guest cleanup (off by default). Restored inside the isApplyingPreset guard so
-        // the didSet doesn't re-persist/reconfigure mid-load; the explicit applyIncomingCleanup()
+        // the didSet doesn't re-persist/reconfigure mid-load; the explicit applyCleanupPlaybackRoute()
         // below starts it if it was persisted enabled (and resolves the effective status).
         incomingCleanupEnabled = d.bool(forKey: PrefKey.incomingEnabled)
         // Speaker Cleanup (off by default). Same isApplyingPreset-guarded restore as Incoming above —
         // the didSet's mutual-exclusion cascade is suppressed here (isApplyingPreset), so a
         // corrupt/hand-edited defaults file with BOTH persisted `true` is corrected explicitly below
-        // rather than relying on the didSet: without that correction `applyIncomingCleanup()` and
-        // `applySpeakerCleanup()` would both start their engines and double-render to the default
+        // rather than relying on the didSet: without that correction `reconcileIncomingCleanup` and
+        // `reconcileSpeakerCleanup` would both start their engines and double-render to the default
         // output, exactly the bug mutual exclusion exists to prevent.
         speakerCleanupEnabled = d.bool(forKey: PrefKey.speakerEnabled)
         if incomingCleanupEnabled && speakerCleanupEnabled {
             speakerCleanupEnabled = false   // Incoming wins; deterministic, matches load order below
         }
+        // Voice Processing I/O (off by default). Same isApplyingPreset-guarded restore as
+        // Incoming/Speaker above — the didSet's `applyMicBackend()` is suppressed here; the explicit
+        // call below starts it if persisted enabled (a true no-op when it wasn't — see applyMicBackend).
+        voiceProcessingEnabled = d.object(forKey: PrefKey.voiceProcessing) as? Bool ?? false
         selectedPreset = preset
         isApplyingPreset = false
         if let p = preset.parameters {  // non-custom: preset defines the values
@@ -821,56 +878,153 @@ public class AudioModel: NSObject, ObservableObject {
         syncAutoState(for: preset)
         // Single explicit configure from the final restored state.
         applyVoiceChain()
-        // Create the incoming engine once, only if the feature was persisted enabled (off → no-op).
-        applyIncomingCleanup()
-        // Same for Speaker Cleanup (mutually exclusive with Incoming — see the correction above).
-        applySpeakerCleanup()
+        // Switch to VoiceIOEngine only if the feature was persisted enabled (off → true no-op).
+        applyMicBackend()
+        // Create the incoming/speaker engine once, only if persisted enabled (off → no-op); mutually
+        // exclusive (see the correction above) so exactly one of the two reconciles does anything.
+        applyCleanupPlaybackRoute()
+    }
+
+    // MARK: - Cleanup-engine route transitions (shared by Incoming + Speaker — review fix S1)
+
+    /// Interprets a `CleanupRouteTransition.plan(...)` mutation list against a concrete
+    /// `CleanupEngineLifecycle` engine type, so `IncomingCleanupEngine` and `SpeakerCleanupEngine`
+    /// share ONE execution path instead of two hand-written, easy-to-desync copies (the review found
+    /// two real bugs in the hand-written version: a hook use-after-free risk (C1) and dangling
+    /// `onRuntimeFailure` closures reused from a replaced instance (H4)). `apply` is called EXACTLY
+    /// once at the end: the built engine on success, or `nil` on any failure (whatever was built so
+    /// far has already been torn down before `apply` runs), or `nil` when `steps` was a teardown-only
+    /// plan that completed cleanly (the caller distinguishes these via its own `desired` target, not
+    /// via this function's return path).
+    private func executeCleanupRouteTransition<Engine: CleanupEngineLifecycle>(
+        steps: [RouteMutation],
+        existing: Engine?,
+        makeEngine: (CleanupPlaybackTarget) -> Engine,
+        onRuntimeFailure: @escaping (Engine) -> Void,
+        apply: (Engine?) -> Void
+    ) {
+        var newEngine: Engine?
+        for step in steps {
+            switch step {
+            case .detachHook:
+                _ = voiceIOEngine?.detachHook()
+            case .stopEngine:
+                existing?.stop()
+            case .buildEngine(let target):
+                let engine = makeEngine(target)
+                let built = (target == .ownEngine) ? engine.start() : engine.prepareCapture()
+                guard built else {
+                    engine.stop()
+                    apply(nil)
+                    return
+                }
+                newEngine = engine
+            case .attachHook:
+                guard let engine = newEngine, let hook = engine.makeRenderHook(),
+                      voiceIOEngine?.restart(withHook: hook, owner: engine) == true else {
+                    newEngine?.stop()
+                    apply(nil)
+                    return
+                }
+            case .startIO:
+                guard let engine = newEngine, engine.startIO() else {
+                    newEngine?.stop()
+                    _ = voiceIOEngine?.detachHook()
+                    apply(nil)
+                    return
+                }
+            }
+        }
+        if let engine = newEngine {
+            // Review fix H4: a FRESH closure per new instance — never reuse a previous engine's
+            // onRuntimeFailure (a stale weak-capture identity check silently no-ops after any route
+            // transition, which is exactly the bug found).
+            engine.onRuntimeFailure = { [weak engine] in
+                guard let engine else { return }
+                onRuntimeFailure(engine)
+            }
+        }
+        apply(newEngine)
     }
 
     // MARK: - Incoming / guest cleanup lifecycle
 
-    /// Create-or-tear-down the tap-based incoming engine to match `incomingCleanupEnabled`, and
-    /// publish the effective `incomingCleanupStatus` for the UI. Off by default — the engine object
-    /// (and thus the second DeepFilterNetDSP's allocations + model load) is constructed ONLY when
-    /// enabled on a supported OS, and released to nil otherwise, so a disabled feature holds zero
-    /// ANE/CPU/memory. Retains the engine ONLY if `start()` returns true (truthful contract): a
-    /// failed start (TCC denied, own-process unresolved, tap/aggregate creation failed) leaves no
-    /// resident pipeline and surfaces `.failed` so granting permission + re-toggling retries.
-    private func applyIncomingCleanup() {
-        guard isIncomingCleanupAvailable else {
+    /// Create-or-tear-down the tap-based incoming engine to match `incomingCleanupEnabled` AND the
+    /// desired playback route, and publish the effective `incomingCleanupStatus`. Review fix M7: the
+    /// TARGET route is decided by the caller (`applyCleanupPlaybackRoute`) BEFORE this runs, so a
+    /// route switch (or a fresh enable while VoiceIOEngine is already active) builds DIRECTLY in the
+    /// target mode — never `.ownEngine`-then-rebuild-to-`.external` (which briefly ran a muted tap +
+    /// a default-output re-render for no reason). Off by default — the engine object (and thus the
+    /// second DeepFilterNetDSP's allocations + model load) is constructed ONLY when enabled on a
+    /// supported OS, and released to nil otherwise, so a disabled feature holds zero ANE/CPU/memory.
+    private func reconcileIncomingCleanup(desiredTarget: CleanupPlaybackTarget) {
+        guard #available(macOS 14.4, *) else {
             // OS < 14.4: never construct the tap engine; the toggle is disabled and shows "unavailable".
-            incomingCleanupStatus = .unavailable
+            teardownIncomingEngine(newStatus: .unavailable)
             return
         }
-        if #available(macOS 14.4, *) {
-            if incomingCleanupEnabled {
-                // Already genuinely running — don't rebuild the tap on a redundant apply.
-                if incomingCleanupStatus == .cleaning, incomingEngine != nil { return }
-                let engine = IncomingCleanupEngine()
-                // Runtime self-teardown (e.g. default output vanished, re-pin/rebuild failed): release
-                // the engine and drop to .failed so the toggle never shows a lying ".cleaning" over a
-                // dead pipeline. Delivered on main; weak captures + identity check ignore a late
-                // callback from an engine we've already replaced or disabled.
-                engine.onRuntimeFailure = { [weak self, weak engine] in
-                    guard let self = self, let engine = engine,
-                          self.incomingEngine === engine else { return }
-                    self.incomingEngine = nil
-                    self.incomingCleanupStatus = .failed
-                }
-                if engine.start() {
-                    incomingEngine = engine
-                    incomingCleanupStatus = .cleaning
+        let desired: CleanupPlaybackTarget? = incomingCleanupEnabled ? desiredTarget : nil
+        let existing = incomingEngine as? IncomingCleanupEngine
+        guard existing?.playbackTarget != desired else { return }   // already correct — no-op
+
+        guard let target = desired else {
+            teardownIncomingEngine(newStatus: .off)
+            return
+        }
+
+        let steps = CleanupRouteTransition.plan(from: existing?.playbackTarget, to: target)
+        executeCleanupRouteTransition(
+            steps: steps, existing: existing,
+            makeEngine: { IncomingCleanupEngine(playbackTarget: $0) },
+            onRuntimeFailure: { [weak self] engine in
+                guard let self, self.incomingEngine === engine else { return }
+                self.releaseIncomingEngine()
+                self.incomingCleanupStatus = .failed
+                self.applyCleanupPlaybackRoute()   // route may now need to fall back to `.ownEngine`
+            },
+            apply: { [weak self] newEngine in
+                guard let self else { return }
+                if let newEngine {
+                    self.incomingEngine = newEngine
+                    self.incomingCleanupStatus = .cleaning
                 } else {
-                    engine.stop()
-                    incomingEngine = nil
-                    incomingCleanupStatus = .failed   // toggle stays on; retry on re-toggle after TCC grant
+                    self.releaseIncomingEngine()
+                    self.incomingCleanupStatus = .failed   // toggle stays on; retry on re-toggle
                 }
-            } else {
-                (incomingEngine as? IncomingCleanupEngine)?.stop()
-                incomingEngine = nil
-                incomingCleanupStatus = .off
+            })
+    }
+
+    /// Tears down the incoming engine (if any) to `nil` — used for both "OS < 14.4" and "feature
+    /// disabled". Always routes through `CleanupRouteTransition.plan(from:to: nil)` (review fix S1)
+    /// so the hook-detach-before-stop ordering is the SAME tested code path as every other teardown,
+    /// never a hand-rolled one-off.
+    private func teardownIncomingEngine(newStatus: IncomingCleanupStatus) {
+        guard #available(macOS 14.4, *) else {
+            incomingCleanupStatus = newStatus
+            return
+        }
+        let existing = incomingEngine as? IncomingCleanupEngine
+        for step in CleanupRouteTransition.plan(from: existing?.playbackTarget, to: nil) {
+            switch step {
+            case .detachHook: _ = voiceIOEngine?.detachHook()
+            case .stopEngine: existing?.stop()
+            default: break
             }
         }
+        releaseIncomingEngine()
+        incomingCleanupStatus = newStatus
+    }
+
+    /// The ONLY place `incomingEngine` is written to `nil`. ALWAYS detaches a VoiceIOEngine hook
+    /// FIRST if the engine being released owns one (review fix C1: releasing a hook-owning engine
+    /// without detaching risked a use-after-free before `VoiceIOEngine.hookOwner`'s strong-reference
+    /// fix — this is the second, belt-and-suspenders layer).
+    private func releaseIncomingEngine() {
+        if #available(macOS 14.4, *), let engine = incomingEngine as? IncomingCleanupEngine,
+           engine.playbackTarget == .external {
+            _ = voiceIOEngine?.detachHook()
+        }
+        incomingEngine = nil
     }
 
     private func persistIncomingSettings() {
@@ -879,78 +1033,261 @@ public class AudioModel: NSObject, ObservableObject {
 
     // MARK: - Speaker Cleanup lifecycle
 
-    /// Create-or-tear-down the direct-hidden-input Speaker Cleanup engine to match
-    /// `speakerCleanupEnabled`, and publish the effective `speakerCleanupStatus`. Mirrors
-    /// `applyIncomingCleanup()`'s truthful-retention contract, but the availability gate is driver
-    /// presence (`SpeakerCleanupEngine.isDriverInstalled()`) instead of an OS version, and there is no
-    /// `#available` indirection since `SpeakerCleanupEngine` uses no macOS-14.4-only API.
-    private func applySpeakerCleanup() {
+    /// Mirrors `reconcileIncomingCleanup` for `SpeakerCleanupEngine` — same M7 "build directly in the
+    /// target mode" fix — but preserves the ORIGINAL deferred-first-tick pattern for any BUILD
+    /// (`.ownEngine` OR `.external`, both eventually call `AudioDeviceStart`): `reconcileSpeakerCleanup`
+    /// is reachable from `AudioModel.init()`, and calling `AudioDeviceStart` synchronously there
+    /// deadlocks the main thread against the HAL's own main-run-loop hand-shake (observed: init()
+    /// parked in `AudioDeviceStart_mac_imp` → `pthread_mutex_wait`, app frozen before first event).
+    private func reconcileSpeakerCleanup(desiredTarget: CleanupPlaybackTarget) {
         guard isSpeakerCleanupAvailable else {
-            // Driver doesn't expose "NoNoise Speaker Tap": never construct the engine; the toggle is
-            // disabled and shows "install the driver" (mirrors Incoming's OS-unavailable path).
-            speakerEngine?.stop()
-            speakerEngine = nil
-            speakerCleanupStatus = .unavailable
+            teardownSpeakerEngine(newStatus: .unavailable)
             return
         }
-        if speakerCleanupEnabled {
-            // Already genuinely running — don't rebuild on a redundant apply.
-            if speakerCleanupStatus == .cleaning, speakerEngine != nil { return }
-            // Defer the actual HAL start to the NEXT run-loop tick. `applySpeakerCleanup()` is
-            // reachable from AudioModel.init(), which runs inside applicationDidFinishLaunching's
-            // Apple-event dispatch — calling AudioDeviceStart synchronously there deadlocks the
-            // main thread against the HAL's own main-run-loop hand-shake (observed: init() parked
-            // in AudioDeviceStart_mac_imp → pthread_mutex_wait, app frozen before first event).
-            // The generation counter drops a stale deferred start if the toggle flips again
-            // (or the sibling exclusion turns us off) before the tick fires.
-            speakerApplyGeneration &+= 1
-            let gen = speakerApplyGeneration
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, self.speakerApplyGeneration == gen,
-                      self.speakerCleanupEnabled else { return }
-                let engine = SpeakerCleanupEngine()
-                // Runtime self-teardown (default output vanished, or resolved to our own "NoNoise
-                // Speaker" with no safe fallback): release the engine and drop to .failed. Weak
-                // captures + identity check ignore a late callback from a replaced/disabled engine.
-                engine.onRuntimeFailure = { [weak self, weak engine] in
-                    guard let self = self, let engine = engine, self.speakerEngine === engine else { return }
-                    self.speakerEngine = nil
-                    self.speakerCleanupStatus = .failed
-                }
-                if engine.start() {
-                    self.speakerEngine = engine
-                    self.speakerCleanupStatus = .cleaning
-                } else {
-                    engine.stop()
-                    self.speakerEngine = nil
-                    self.speakerCleanupStatus = .failed   // toggle stays on; retry on re-toggle
-                }
-            }
-        } else {
-            speakerApplyGeneration &+= 1   // invalidate any in-flight deferred start
-            speakerEngine?.stop()
-            speakerEngine = nil
-            speakerCleanupStatus = .off
+        let desired: CleanupPlaybackTarget? = speakerCleanupEnabled ? desiredTarget : nil
+        let existing = speakerEngine
+        guard existing?.playbackTarget != desired else { return }   // already correct — no-op
+
+        guard let target = desired else {
+            // Disabling — tear down immediately (no HAL start involved, so no deadlock risk here).
+            teardownSpeakerEngine(newStatus: .off)
+            return
         }
+
+        // Building (fresh enable OR a route switch while enabled) — defer to the NEXT run-loop tick.
+        // The generation counter drops a stale deferred build if the toggle/route flips again before
+        // the tick fires (or the sibling exclusion turns Speaker off).
+        speakerApplyGeneration &+= 1
+        let gen = speakerApplyGeneration
+        let currentTarget = existing?.playbackTarget
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.speakerApplyGeneration == gen, self.speakerCleanupEnabled else { return }
+            let steps = CleanupRouteTransition.plan(from: currentTarget, to: target)
+            self.executeCleanupRouteTransition(
+                steps: steps, existing: existing,
+                makeEngine: { SpeakerCleanupEngine(playbackTarget: $0) },
+                onRuntimeFailure: { [weak self] engine in
+                    guard let self, self.speakerEngine === engine else { return }
+                    self.releaseSpeakerEngine()
+                    self.speakerCleanupStatus = .failed
+                    self.applyCleanupPlaybackRoute()   // route may now need to fall back to `.ownEngine`
+                },
+                apply: { [weak self] newEngine in
+                    guard let self else { return }
+                    if let newEngine {
+                        self.speakerEngine = newEngine
+                        self.speakerCleanupStatus = .cleaning
+                    } else {
+                        self.releaseSpeakerEngine()
+                        self.speakerCleanupStatus = .failed   // toggle stays on; retry on re-toggle
+                    }
+                })
+        }
+    }
+
+    /// Tears down the speaker engine (if any) to `nil` — used for both "driver not installed" and
+    /// "feature disabled". Same `CleanupRouteTransition.plan(from:to: nil)` ordering as
+    /// `teardownIncomingEngine` (review fix S1) — no HAL start involved, so no deferral needed here.
+    private func teardownSpeakerEngine(newStatus: SpeakerCleanupStatus) {
+        speakerApplyGeneration &+= 1   // invalidate any in-flight deferred build
+        let existing = speakerEngine
+        for step in CleanupRouteTransition.plan(from: existing?.playbackTarget, to: nil) {
+            switch step {
+            case .detachHook: _ = voiceIOEngine?.detachHook()
+            case .stopEngine: existing?.stop()
+            default: break
+            }
+        }
+        releaseSpeakerEngine()
+        speakerCleanupStatus = newStatus
+    }
+
+    /// The ONLY place `speakerEngine` is written to `nil` — mirrors `releaseIncomingEngine` (C1).
+    private func releaseSpeakerEngine() {
+        if let engine = speakerEngine, engine.playbackTarget == .external {
+            _ = voiceIOEngine?.detachHook()
+        }
+        speakerEngine = nil
     }
 
     private func persistSpeakerSettings() {
         UserDefaults.standard.set(speakerCleanupEnabled, forKey: PrefKey.speakerEnabled)
     }
 
-    /// Called from applicationWillTerminate: tear down the live cleanup pipelines WITHOUT touching
-    /// the persisted toggles (the user's on/off choice must survive relaunch), and invalidate any
-    /// in-flight deferred speaker start (audit finding: a deferred start firing during app teardown
-    /// would call AudioDeviceStart mid-HAL-teardown). Intentionally does NOT go through the
-    /// `speakerCleanupEnabled`/`incomingCleanupEnabled` setters — those persist their new value.
+    // MARK: - Voice Processing I/O (VPIO) capture backend
+
+    /// Wires a backend's `onAudio` to `ingest()`. `[weak self]` matches the original inline closure
+    /// from `init()`; called once for `avCaptureBackend` there, and once per fresh `VoiceIOEngine`
+    /// construction in `applyMicBackend()`.
+    private func wireOnAudio(_ backend: MicCaptureBackend) {
+        backend.onAudio = { [weak self] floatData, count in
+            self?.ingest(floatData, count: count)
+        }
+    }
+
+    /// Swaps `currentBackend`, per the plan's backend-switch order: old backend `stop()` →
+    /// `ringBuffer.reset()` (safe — the producer is stopped) → the new backend becomes current (its
+    /// `configure`/conditional `start()` is the caller's job, via `setupCaptureSession()`). A no-op
+    /// when `backend` is already current.
+    private func switchCaptureBackend(to backend: MicCaptureBackend) {
+        guard currentBackend !== backend else { return }
+        currentBackend.stop()
+        ringBuffer.reset()
+        currentBackend = backend
+    }
+
+    /// Create-or-tear-down `voiceIOEngine` to match `voiceProcessingEnabled`, and switch
+    /// `currentBackend` between it and the always-available `avCaptureBackend`. Mirrors
+    /// `reconcileIncomingCleanup`'s truthful-retention contract: `voiceIOEngine` is released to `nil`
+    /// whenever it isn't the active backend, so a disabled/failed VPIO path holds zero AEC/tap
+    /// resources. The OFF branch is a TRUE no-op when nothing was ever enabled (`voiceIOEngine == nil`
+    /// and status is already `.off`) — no backend switch, no `setupCaptureSession()` call, no
+    /// `@Published` write — which is what keeps `voiceProcessingEnabled == false` byte-for-byte
+    /// unchanged from pre-Phase-2 behavior no matter how many times `loadSettings()` /
+    /// `resetSettingsToDefaults()` calls this. Review fix M3: NO optimistic `.active` pre-write on the
+    /// ENABLE path — `voiceProcessingStatus` is written only once the ACTUAL outcome of
+    /// `setupCaptureSession()` (configure + conditional start) is known.
+    private func applyMicBackend() {
+        guard voiceProcessingEnabled else {
+            guard voiceIOEngine != nil else {
+                if voiceProcessingStatus != .off { voiceProcessingStatus = .off }
+                return
+            }
+            voiceIOEngine?.stop()
+            voiceIOEngine = nil
+            switchCaptureBackend(to: avCaptureBackend)
+            voiceProcessingStatus = .off
+            setupCaptureSession()
+            applyCleanupPlaybackRoute()
+            return
+        }
+
+        if voiceIOEngine == nil {
+            let engine = VoiceIOEngine()
+            wireOnAudio(engine)
+            engine.onRuntimeFailure = { [weak self] in
+                self?.fallBackFromVoiceIO(reason: .runtimeRestartExhausted)
+            }
+            // Review fix H5: after VoiceIOEngine rebuilds itself (default-output change / config-
+            // change recovery) WITHOUT AudioModel's involvement, re-verify a hook-owning cleanup
+            // engine's capture side is still alive.
+            engine.onRebuilt = { [weak self] in
+                self?.verifyCleanupHealthAfterVoiceIORebuild()
+            }
+            voiceIOEngine = engine
+        }
+        switchCaptureBackend(to: voiceIOEngine!)
+
+        let configured = setupCaptureSession()
+        if configured, !shouldCapture {
+            // Configured successfully but idle (on-demand gate closed): no start was attempted, so
+            // `startCurrentBackendAndHandleFailure()` never ran to finalize status. This IS the
+            // confirmed outcome for this branch (configure succeeded), not an optimistic guess.
+            voiceProcessingStatus = .active
+            applyCleanupPlaybackRoute()
+        }
+    }
+
+    /// Starts `currentBackend`, and — when it's `voiceIOEngine` — checks the (synchronous) outcome:
+    /// falls back to `avCaptureBackend` immediately on a failed start OR a failed manual-device pin
+    /// (review fix H1: a pin failure used to just SET the `.fallback` status without actually
+    /// switching capture, leaving VPIO silently capturing the wrong device while the UI claimed
+    /// "従来方式で動作中"), or publishes `.active` on a genuinely clean success. Centralizes the
+    /// fallback so it fires from EVERY call site that can trigger a VoiceIOEngine start: the initial
+    /// enable (`applyMicBackend`, via `setupCaptureSession`), a later on-demand `startCapture()` (mic
+    /// goes into use), and a manual device-selection change (`setupCaptureSession()`). A no-op beyond
+    /// the plain `.start()` call when `currentBackend` is `avCaptureBackend` — preserves the
+    /// pre-Phase-2 behavior exactly on that path.
+    private func startCurrentBackendAndHandleFailure() {
+        currentBackend.start()
+        guard let vio = currentBackend as? VoiceIOEngine else { return }
+        guard vio.isRunning else {
+            fallBackFromVoiceIO(reason: vio.lastFailureReason ?? .startFailed)
+            return
+        }
+        let reason = vio.lastPinFailed
+            ? VoiceIOLogic.inputPinFailureReason(isManualSelection: vio.isManualDeviceSelection)
+            : nil
+        if let reason {
+            fallBackFromVoiceIO(reason: reason)   // H1: actually switch to AVCapture, not just the status
+        } else {
+            voiceProcessingStatus = .active
+            applyCleanupPlaybackRoute()
+        }
+    }
+
+    /// Tears down a non-functioning `voiceIOEngine`, switches capture to `avCaptureBackend`, and
+    /// publishes the resulting status via the pure `VoiceIOLogic.effectiveStatus`. Shared by a
+    /// synchronous start/configure/pin failure (`startCurrentBackendAndHandleFailure`,
+    /// `setupCaptureSession`) and the async `onRuntimeFailure` (post-start teardown) path.
+    private func fallBackFromVoiceIO(reason: FallbackReason) {
+        voiceIOEngine?.stop()
+        voiceIOEngine = nil
+        switchCaptureBackend(to: avCaptureBackend)
+        let configured = avCaptureBackend.configure(deviceUID: selectedInputDeviceID)
+        if configured && shouldCapture { avCaptureBackend.start() }
+        voiceProcessingStatus = VoiceIOLogic.effectiveStatus(enabled: voiceProcessingEnabled,
+                                                             voiceIORunning: false,
+                                                             fallbackReason: reason,
+                                                             avCaptureConfigured: configured)
+        applyCleanupPlaybackRoute()
+    }
+
+    /// Review fix H5 (second half): after VoiceIOEngine rebuilds itself successfully (a restart it
+    /// initiated on its own — default-output change / config-change recovery), re-verify that a
+    /// hook-owning (`.external`) cleanup engine's capture side is STILL alive. The rebuild's own
+    /// default-output listener already fires the cleanup engine's OWN `checkExternalHealth` on the
+    /// same underlying event, so this is defense-in-depth for the case where VoiceIOEngine's rebuild
+    /// itself is the more reliable signal.
+    private func verifyCleanupHealthAfterVoiceIORebuild() {
+        if #available(macOS 14.4, *), let inc = incomingEngine as? IncomingCleanupEngine,
+           inc.playbackTarget == .external, !inc.isCaptureAlive {
+            releaseIncomingEngine()
+            incomingCleanupStatus = .failed
+            applyCleanupPlaybackRoute()
+            return
+        }
+        if let spk = speakerEngine, spk.playbackTarget == .external, !spk.isCaptureAlive {
+            releaseSpeakerEngine()
+            speakerCleanupStatus = .failed
+            applyCleanupPlaybackRoute()
+        }
+    }
+
+    /// Re-evaluates which playback route the ACTIVE receive-cleanup engine (Incoming or Speaker —
+    /// mutually exclusive) should use, per the pure `VoiceIOLogic.cleanupRoute(voiceIOActive:
+    /// micInUse:)` decision, and reconciles BOTH engines against it (whichever isn't enabled is
+    /// already a no-op). `voiceIOActive` is derived from `voiceProcessingStatus == .active` alone
+    /// (NOT the raw flag) so a flag-off / fallback / failed VoiceIOEngine always resolves to
+    /// `.ownEngine`. Review fix H2: `micInUse` uses `shouldCapture` (the SAME on-demand gate the mic
+    /// backend itself uses — `!onDemandMode || virtualMicInUse`), not `virtualMicInUse` alone, so the
+    /// always-on (no-driver) case actually reaches `.voiceIOHook` instead of being permanently stuck
+    /// at `.ownEngine` (an always-off `virtualMicInUse` in that mode).
+    private func applyCleanupPlaybackRoute() {
+        let voiceIOActive = (voiceProcessingStatus == .active)
+        let target = VoiceIOLogic.cleanupRoute(voiceIOActive: voiceIOActive, micInUse: shouldCapture).playbackTarget
+        reconcileIncomingCleanup(desiredTarget: target)
+        reconcileSpeakerCleanup(desiredTarget: target)
+    }
+
+    /// Called from applicationWillTerminate: tear down the live cleanup pipelines AND the VPIO
+    /// backend WITHOUT touching the persisted toggles (the user's on/off choice must survive
+    /// relaunch), and invalidate any in-flight deferred speaker start (audit finding: a deferred start
+    /// firing during app teardown would call AudioDeviceStart mid-HAL-teardown). Intentionally does
+    /// NOT go through the `speakerCleanupEnabled`/`incomingCleanupEnabled`/`voiceProcessingEnabled`
+    /// setters — those persist their new value.
     public func shutdownCleanupEngines() {
         speakerApplyGeneration &+= 1   // drop any deferred start still queued on the run loop
         speakerEngine?.stop()
-        speakerEngine = nil
+        releaseSpeakerEngine()
         if #available(macOS 14.4, *) {
             (incomingEngine as? IncomingCleanupEngine)?.stop()
         }
-        incomingEngine = nil
+        releaseIncomingEngine()
+        // Review fix C1: stop VPIO too, on the same teardown pass — `releaseXEngine()` above already
+        // detached any hook it owned, but stopping it explicitly avoids leaving the paired
+        // input/output duplex unit running through app teardown.
+        voiceIOEngine?.stop()
     }
 
     /// Resolve a device UID to its AudioObjectID via the HAL. Works for INPUT-only devices too
@@ -1236,18 +1573,36 @@ public class AudioModel: NSObject, ObservableObject {
         if target != selectedInputDeviceID { selectedInputDeviceID = target }
     }
 
-    func setupCaptureSession() {
+    /// Returns whether `configure()` succeeded — `applyMicBackend()` reads this to know whether a
+    /// start was even attempted (review fix M3). `@discardableResult` since most call sites (device-
+    /// selection didSets, hardware refresh) don't need the outcome.
+    @discardableResult
+    func setupCaptureSession() -> Bool {
+        // VoiceIOEngine-only: tell it whether the CURRENT selection is an explicit user device choice
+        // (vs. auto-follow-default) before configuring, so a later pin failure can be judged correctly
+        // (see VoiceIOLogic.inputPinFailureReason). No-op (branch never taken) when `currentBackend`
+        // is `avCaptureBackend` — i.e. always, while `voiceProcessingEnabled == false`.
+        if let vio = currentBackend as? VoiceIOEngine {
+            vio.isManualDeviceSelection = inputDeviceSelection != VirtualMicRouting.autoInputSelection
+        }
         // A failed configure (device not found — hit at first launch, when selectedInputDeviceID
         // is still "" ahead of fetchInputDevices()'s async resolve — or the session refused the
         // input) must NOT reach start(), matching the pre-extraction setupCaptureSession's early
         // `return` on device-not-found.
-        let configured = micBackend.configure(deviceUID: selectedInputDeviceID)
+        let configured = currentBackend.configure(deviceUID: selectedInputDeviceID)
 
         // Only hold the real mic when we actually need it (see on-demand mode). In always-on mode
         // (no driver) this is always true, preserving the previous behavior.
         if configured && shouldCapture {
-            micBackend.start()
+            startCurrentBackendAndHandleFailure()
+        } else if !configured, currentBackend is VoiceIOEngine {
+            // Review fix M3: VoiceIOEngine couldn't even configure for this device — fall back
+            // immediately rather than leaving `voiceProcessingStatus` stale. AVCaptureMicBackend's
+            // own configure failing is unaffected (matches pre-Phase-2 behavior exactly: it just
+            // doesn't start, no special handling).
+            fallBackFromVoiceIO(reason: .startFailed)
         }
+        return configured
     }
 
     // MARK: - On-demand capture (mic indicator only while NoNoise Mic is in use)
@@ -1265,6 +1620,7 @@ public class AudioModel: NSObject, ObservableObject {
         guard onDemandMode else {
             virtualMicInUse = false
             if wasOnDemandMode { startCapture() }
+            applyCleanupPlaybackRoute()   // no-op unless voiceProcessingEnabled + a cleanup feature is on
             return
         }   // no driver → stay always-on, no listener
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
@@ -1286,6 +1642,7 @@ public class AudioModel: NSObject, ObservableObject {
         Self.routeLog.info("refreshVirtualMicUsage inUse=\(inUse, privacy: .public)")
         virtualMicInUse = inUse
         if inUse { startCapture() } else { stopCapture() }
+        applyCleanupPlaybackRoute()   // no-op unless voiceProcessingEnabled + a cleanup feature is on
     }
 
     private func installHardwareDeviceListener() {
@@ -1451,13 +1808,13 @@ public class AudioModel: NSObject, ObservableObject {
     }
 
     private func startCapture() {
-        Self.routeLog.info("startCapture (isRunning=\(self.micBackend.isRunning, privacy: .public))")
-        micBackend.start()
+        Self.routeLog.info("startCapture (isRunning=\(self.currentBackend.isRunning, privacy: .public))")
+        startCurrentBackendAndHandleFailure()
     }
 
     private func stopCapture() {
-        Self.routeLog.info("stopCapture (isRunning=\(self.micBackend.isRunning, privacy: .public))")
-        micBackend.stop()
+        Self.routeLog.info("stopCapture (isRunning=\(self.currentBackend.isRunning, privacy: .public))")
+        currentBackend.stop()
     }
 
     // MARK: - Input Volume, telemetry & Smart Level

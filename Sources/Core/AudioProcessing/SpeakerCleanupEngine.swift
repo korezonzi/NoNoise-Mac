@@ -36,7 +36,13 @@ import CTapRing
 /// allocation/lock/syscall-free and treat the HAL input buffers as read-only.
 public final class SpeakerCleanupEngine {
 
-    // MARK: Playback graph (cleaned re-render → default PHYSICAL output)
+    /// Which playback route this instance was built for — mirrors
+    /// `IncomingCleanupEngine.playbackTarget`. `.ownEngine` (default) builds the full playback
+    /// `AVAudioEngine` below; `.external` builds ONLY the capture side (Tap+aggregate+IOProc) and
+    /// exposes a `CleanupRenderHook` via `makeRenderHook()` for `VoiceIOEngine` to render instead.
+    let playbackTarget: CleanupPlaybackTarget
+
+    // MARK: Playback graph (cleaned re-render → default PHYSICAL output) — built only for `.ownEngine`.
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode!
     private var sourceNodeAttached = false          // attach once; engine.reset() does NOT detach nodes
@@ -90,7 +96,20 @@ public final class SpeakerCleanupEngine {
     /// Speaker with no safe fallback). Mirrors `IncomingCleanupEngine.onRuntimeFailure`.
     public var onRuntimeFailure: (() -> Void)?
 
-    public init() {
+    /// True only while the capture side is fully built. Internal (not `private`) so `AudioModel` can
+    /// re-verify it after a VoiceIOEngine rebuild (review fix H5), mirroring
+    /// `IncomingCleanupEngine.isCaptureAlive`.
+    var isCaptureAlive: Bool { tapDeviceID != 0 && aggregateID != 0 && ioProcID != nil }
+
+    /// Default-output listener installed ONLY for `.external` mode — mirrors
+    /// `IncomingCleanupEngine.externalHealthListener`. Unlike Incoming's process tap, this engine's
+    /// capture side (the driver's Tap + our own private aggregate, created/destroyed end-to-end by
+    /// us) is NOT independently invalidated by the system, but the health check is kept symmetric
+    /// with Incoming's for the same "cheap, event-driven check" reasoning (review fix H5).
+    private var externalHealthListener: AudioObjectPropertyListenerBlock?
+
+    public init(playbackTarget: CleanupPlaybackTarget = .ownEngine) {
+        self.playbackTarget = playbackTarget
         monoScratch = UnsafeMutablePointer<Float>.allocate(capacity: monoScratchCapacity)
         monoScratch.initialize(repeating: 0, count: monoScratchCapacity)
         silenceRunCountBox = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
@@ -98,46 +117,19 @@ public final class SpeakerCleanupEngine {
         levelBox = UnsafeMutablePointer<Float>.allocate(capacity: 1)
         levelBox.initialize(to: 0)
 
-        // Consumer (render thread): drain → (maybe bypass) → DFN → play. Captures RAW pointers (ring's
-        // C struct, the silence counter box) and the DSP — no ARC/dispatch calls on `self`.
-        let ringPtr = ring.cRing
-        let dspRef = dsp
-        let silenceCountPtr = silenceRunCountBox
-        let levelPtr = levelBox
-        let threshold = SpeakerCleanupEngine.silenceRMSThreshold
-        let holdBuffers = SpeakerCleanupEngine.silenceHoldBuffers
-        let latencyTarget = AudioLatency.ringTargetFrames
+        // Consumer (render thread, `.ownEngine` only): drain → (maybe bypass) → DFN → play, via the
+        // SAME static step `.external` mode's VoiceIOEngine hook uses (`VoiceIOEngine.renderCleanup`)
+        // — a byte-for-byte equivalent refactor of what used to be inlined here. Captures only the
+        // raw-pointer/Unmanaged `hook` value — no ARC/dispatch calls on `self`.
+        let hook = CleanupRenderHook(ringPtr: ring.cRing, dsp: .passUnretained(dsp), levelPtr: levelBox,
+                                     latencyTargetFrames: AudioLatency.ringTargetFrames,
+                                     silenceRunCountBox: silenceRunCountBox,
+                                     silenceRMSThreshold: SpeakerCleanupEngine.silenceRMSThreshold,
+                                     silenceHoldBuffers: SpeakerCleanupEngine.silenceHoldBuffers)
         sourceNode = AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
             guard let data = abl[0].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
-            let count = Int(frameCount)
-            // Latency trim (same shape as IncomingCleanupEngine / AudioModel's render callback).
-            let available = Int(tap_ring_available(ringPtr))
-            if available > latencyTarget + count { tap_ring_drop(ringPtr, UInt32(available - latencyTarget)) }
-            if tap_ring_read(ringPtr, data, UInt32(count)) == 0 {
-                data.update(repeating: 0, count: count)   // underflow → silence (allocation-free)
-                levelPtr.pointee = 0
-                return noErr
-            }
-            // Sustained near-silence → skip the CoreML call entirely (buffer is already near-zero,
-            // so passing it through unprocessed is inaudible). Resumes DFN immediately once the
-            // signal comes back above threshold.
-            var rms: Float = 0
-            vDSP_rmsqv(data, 1, &rms, vDSP_Length(count))
-            levelPtr.pointee = rms
-            if rms < threshold {
-                if silenceCountPtr.pointee < Int32.max { silenceCountPtr.pointee += 1 }
-                if silenceCountPtr.pointee > holdBuffers {
-                    // Bypass skips dsp.process(), which is the only place aiActivity updates —
-                    // decay it here so the popover's AI bar doesn't freeze on a stale value
-                    // while the incoming audio is silent (same rationale as DFN's own decay).
-                    dspRef.aiActivity *= 0.85
-                    return noErr
-                }
-            } else {
-                silenceCountPtr.pointee = 0
-            }
-            dspRef.process(input: data, count: count, output: data)
+            VoiceIOEngine.renderCleanup(hook: hook, data: data, count: Int(frameCount))
             return noErr
         }
     }
@@ -168,6 +160,65 @@ public final class SpeakerCleanupEngine {
         stop()                                  // clean slate; idempotent
         ring.clear()
 
+        guard prepareCaptureInternal() else { stop(); return false }
+
+        if playbackTarget == .ownEngine {
+            // Pin + start the playback engine FIRST, refusing a self-loop onto our own "NoNoise
+            // Speaker" (see `repinToDefaultOutput`).
+            guard startPlayback() else { stop(); return false }
+        }
+
+        guard startIO() else { stop(); return false }   // starts the AGGREGATE's IO LAST.
+
+        if playbackTarget == .ownEngine {
+            // Follow the default output (manual switches + Bluetooth/TWS auto-switch).
+            installDefaultOutputListener()
+            installConfigChangeObserver()
+        }
+        return true
+    }
+
+    /// Build ONLY the capture side (Tap + private aggregate + IOProc) — used by the `.external`
+    /// (`VoiceIOEngine`-hook) route. Equivalent to `start()`'s capture steps, without touching the
+    /// playback graph or starting IO. Returns `true` only when the whole capture chain is built;
+    /// `false` (fully torn down) on any failure.
+    @discardableResult
+    public func prepareCapture() -> Bool {
+        stop()
+        ring.clear()
+        guard prepareCaptureInternal() else { stop(); return false }
+        installExternalHealthListener()
+        return true
+    }
+
+    /// Start the aggregate's IO. Call ONLY after `prepareCapture()` succeeded (`.external`) —
+    /// `.ownEngine`'s composite `start()` calls this itself, after its own playback graph is live.
+    @discardableResult
+    public func startIO() -> Bool {
+        guard let proc = ioProcID, aggregateID != 0, AudioDeviceStart(aggregateID, proc) == noErr else {
+            return false
+        }
+        running = true
+        return true
+    }
+
+    /// Render hook for the `.external` route — `nil` until the capture side is genuinely built.
+    /// `VoiceIOEngine.restart(withHook:)` renders this instead of this engine's own (never-built, in
+    /// `.external` mode) playback graph.
+    func makeRenderHook() -> CleanupRenderHook? {
+        guard isCaptureAlive else { return nil }
+        return CleanupRenderHook(ringPtr: ring.cRing, dsp: .passUnretained(dsp), levelPtr: levelBox,
+                                 latencyTargetFrames: AudioLatency.ringTargetFrames,
+                                 silenceRunCountBox: silenceRunCountBox,
+                                 silenceRMSThreshold: SpeakerCleanupEngine.silenceRMSThreshold,
+                                 silenceHoldBuffers: SpeakerCleanupEngine.silenceHoldBuffers)
+    }
+
+    /// Steps 1–6 of the original `start()`: resolve the hidden Tap, confirm its format, wrap it in a
+    /// private 48 kHz aggregate, re-confirm the format across the aggregate boundary, and wire the
+    /// IOProc. Does NOT call `stop()` on failure — callers (`start()`, `prepareCapture()`) do that,
+    /// matching the original call sites exactly.
+    private func prepareCaptureInternal() -> Bool {
         // 1. Resolve the hidden "NoNoise Speaker Tap" by UID. 0 ⇒ driver not installed (or doesn't
         //    expose the speaker pair) — the caller (AudioModel) is expected to have already gated on
         //    `SpeakerCleanupEngine.isDriverInstalled()`, but re-check here so `start()` alone is safe.
@@ -179,7 +230,7 @@ public final class SpeakerCleanupEngine {
         //    Feeding a mismatched format into the fixed stereo-interleaved downmix would misread the
         //    buffer, so refuse rather than guess (same "safe side" rule as IncomingCleanupEngine's
         //    48 kHz pin check).
-        guard Self.confirmExpectedFormat(deviceID: resolved) else { stop(); return false }
+        guard Self.confirmExpectedFormat(deviceID: resolved) else { return false }
 
         // 3. Wrap the Tap in a PRIVATE AGGREGATE device (mirrors IncomingCleanupEngine's tap+aggregate
         //    construction). The IOProc + AudioDeviceStart below target this aggregate, never the Tap
@@ -199,37 +250,24 @@ public final class SpeakerCleanupEngine {
         var newAggID = AudioObjectID(0)
         guard AudioHardwareCreateAggregateDevice(aggDict as CFDictionary, &newAggID) == noErr,
               newAggID != 0 else {
-            stop(); return false
+            return false
         }
         aggregateID = newAggID
 
         // 4. Pin the aggregate to 48 kHz (same "refuse rather than guess" rule as
         //    IncomingCleanupEngine.pinSampleRate48k — a rate mismatch across the aggregate boundary
         //    would misfeed the IOProc / DFN).
-        guard pinSampleRate48k(newAggID) else { stop(); return false }
+        guard pinSampleRate48k(newAggID) else { return false }
 
         // 5. Re-confirm the format the IOProc will ACTUALLY receive once wrapped in the aggregate —
         //    the aggregate boundary can in principle change buffer layout even when the underlying
         //    sub-device didn't, so don't assume the step-2 confirmation on the raw Tap still holds
         //    once IO runs through the aggregate (see IncomingCleanupEngine's tap+aggregate handling).
-        guard Self.confirmExpectedFormat(deviceID: newAggID) else { stop(); return false }
+        guard Self.confirmExpectedFormat(deviceID: newAggID) else { return false }
 
         // 6. IOProc: downmix the aggregate's stereo-interleaved audio → mono → lock-free ring.
-        guard createIOProc(deviceID: newAggID) else { stop(); return false }
+        guard createIOProc(deviceID: newAggID) else { return false }
 
-        // 7. Pin + start the playback engine FIRST, refusing a self-loop onto our own "NoNoise
-        //    Speaker" (see `repinToDefaultOutput`). No output at all, or a self-loop with no safe
-        //    fallback, both fail `start()` cleanly rather than ever rendering into our own Tap.
-        guard startPlayback() else { stop(); return false }
-
-        // 8. Start the AGGREGATE's IO LAST (never the Tap directly — see class header).
-        guard let proc = ioProcID, AudioDeviceStart(newAggID, proc) == noErr else { stop(); return false }
-
-        // 9. Follow the default output (manual switches + Bluetooth/TWS auto-switch).
-        installDefaultOutputListener()
-        installConfigChangeObserver()
-
-        running = true
         return true
     }
 
@@ -254,6 +292,7 @@ public final class SpeakerCleanupEngine {
         tapDeviceID = 0
         removeDefaultOutputListener()
         removeConfigChangeObserver()
+        removeExternalHealthListener()
         engine.stop()
         engine.reset()
         pinnedDeviceID = 0
@@ -556,6 +595,42 @@ public final class SpeakerCleanupEngine {
         if let obs = configObserver {
             NotificationCenter.default.removeObserver(obs)
             configObserver = nil
+        }
+    }
+
+    // MARK: - `.external`-mode health check (review fix H5)
+
+    private func installExternalHealthListener() {
+        guard externalHealthListener == nil else { return }
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.checkExternalHealth()
+        }
+        externalHealthListener = block
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr,
+                                            DispatchQueue.main, block)
+    }
+
+    private func removeExternalHealthListener() {
+        guard let block = externalHealthListener else { return }
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &addr,
+                                               DispatchQueue.main, block)
+        externalHealthListener = nil
+    }
+
+    /// `.external`-mode-only health check, mirroring `IncomingCleanupEngine.checkExternalHealth`.
+    /// Reuses `IncomingTapLogic.repinDecision` (a plain `tapAlive -> .repin/.rebuild` mapping, not
+    /// specific to the process-tap path) rather than re-deriving the same trivial decision.
+    private func checkExternalHealth() {
+        guard playbackTarget == .external, running else { return }
+        guard IncomingTapLogic.repinDecision(tapAlive: isCaptureAlive) == .repin else {
+            teardownAndNotifyFailure()
+            return
         }
     }
 }

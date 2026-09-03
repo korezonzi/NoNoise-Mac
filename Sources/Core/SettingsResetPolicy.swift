@@ -16,6 +16,7 @@ public enum SettingsResetPolicy {
     public static let loudnessNormKey = "mv.loudnessNorm"
     public static let loudnessTargetKey = "mv.loudnessTarget"
     public static let inputDeviceKey = "mv.inputDeviceUID"
+    public static let voiceProcessingKey = "mv.voiceProcessing"
 
     public static let resettableKeys: [String] = [
         presetKey,
@@ -31,7 +32,8 @@ public enum SettingsResetPolicy {
         speakerEnabledKey,
         loudnessNormKey,
         loudnessTargetKey,
-        inputDeviceKey
+        inputDeviceKey,
+        voiceProcessingKey
     ]
 
     public static func reset(defaults: UserDefaults = .standard) {
