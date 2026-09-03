@@ -48,7 +48,10 @@ cable so any app (Zoom, Meet, Discord, OBS, …) receives studio-clean audio.
     `FallbackReason` (the UI-facing effective-state enums), `CleanupPlaybackRoute`/
     `CleanupPlaybackTarget` (own-engine vs VPIO-hook playback routing), `CleanupRouteTransition.plan`
     (the ordered mutation list — `RouteMutation` — for moving a cleanup engine between routes, or
-    tearing it down), `cleanupRoute`/`effectiveStatus`/`inputPinFailureReason`/`startFailureAction`.
+    tearing it down), `cleanupRoute`/`effectiveStatus`/`inputPinFailureReason`/`startFailureAction`,
+    and `EchoRiskLogic` (the incoming card's built-in-speaker captions: the orange echo warning is
+    suppressed while `voiceProcessingStatus == .active`, and a neutral "turn cleanup on" suggestion
+    shows in the inverse configuration — display only, never auto-enables).
   - `AudioProcessing/MicFormatNormalizer` — per-tap-buffer format VALIDATION (mono/48 kHz, matching
     the tap's own fixed format) for `VoiceIOEngine`. No resampling: a non-48k input bus abandons VPIO
     entirely (see below) rather than converting.

@@ -174,3 +174,25 @@ public enum VoiceIOLogic {
         consecutiveFailures >= maxAttempts ? .giveUp : .retry
     }
 }
+
+/// Pure decisions for the built-in-speaker echo captions in the incoming card. Before the VPIO
+/// AEC existed, "cleanup re-rendering to the built-in speaker" was unconditionally hazardous
+/// (knowledge1.md 2026-09-01); with an ACTIVE VoiceIOEngine our own AEC cancels that playback
+/// from the mic feed, so the hazard — and the warning — apply only while it is NOT active.
+public enum EchoRiskLogic {
+
+    /// The orange warning caption: cleanup is re-rendering to the built-in speaker AND our own
+    /// AEC is not active — the only configuration where the far side hears themselves.
+    public static func shouldWarnBuiltInSpeakerEcho(cleaning: Bool, isBuiltInSpeaker: Bool,
+                                                    voiceIOActive: Bool) -> Bool {
+        cleaning && isBuiltInSpeaker && !voiceIOActive
+    }
+
+    /// The neutral suggestion caption: AEC is active and the built-in speaker is live, but cleanup
+    /// is off — turning cleanup on adds far-side noise removal AND routes ALL far-end playback
+    /// through the VPIO output bus, making the AEC reference complete by construction.
+    public static func shouldSuggestCleanupOnSpeaker(voiceIOActive: Bool, isBuiltInSpeaker: Bool,
+                                                     cleanupOff: Bool) -> Bool {
+        voiceIOActive && isBuiltInSpeaker && cleanupOff
+    }
+}

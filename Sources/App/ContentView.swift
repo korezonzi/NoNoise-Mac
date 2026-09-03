@@ -246,10 +246,25 @@ struct ContentView: View {
             // Echo guard: while cleaning, the re-render goes to the system default output. If that
             // is the built-in SPEAKER, the built-in mic hears it and the call app's own echo
             // canceller can't remove it across our added latency — the far side hears themselves.
-            // Warn while the hazardous combination is live (both backends re-render the same way).
-            if isCleanIncomingCleaning, audioModel.defaultOutputIsBuiltInSpeaker {
+            // With an ACTIVE VoiceIOEngine our own AEC cancels that playback from the mic feed,
+            // so the hazard (and the warning) apply only while it is NOT active (EchoRiskLogic).
+            if EchoRiskLogic.shouldWarnBuiltInSpeakerEcho(
+                cleaning: isCleanIncomingCleaning,
+                isBuiltInSpeaker: audioModel.defaultOutputIsBuiltInSpeaker,
+                voiceIOActive: audioModel.voiceProcessingStatus == .active) {
                 Text("内蔵スピーカーで再生中 — 相手にエコーが返る原因になります。イヤホンの使用を推奨（スピーカーで話すときはこの機能をオフに）")
                     .font(.caption2).foregroundColor(.orange)
+            }
+
+            // The inverse suggestion: AEC is active and the speaker is live, but cleanup is off —
+            // turning it on adds far-side noise removal and completes the AEC reference. Display
+            // only; never auto-enables anything.
+            if EchoRiskLogic.shouldSuggestCleanupOnSpeaker(
+                voiceIOActive: audioModel.voiceProcessingStatus == .active,
+                isBuiltInSpeaker: audioModel.defaultOutputIsBuiltInSpeaker,
+                cleanupOff: !isCleanIncomingCleaning) {
+                Text("スピーカー通話中もエコーキャンセルが有効です。「相手の音声もクリアに」を ON にすると相手側のノイズも除去できます")
+                    .font(.caption2).foregroundColor(.secondary)
             }
         }
         .nnCard()

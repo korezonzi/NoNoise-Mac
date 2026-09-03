@@ -177,4 +177,67 @@ final class VoiceIOLogicTests: XCTestCase {
         XCTAssertFalse(CleanupRouteTransition.plan(from: nil, to: .external).contains(.stopEngine))
         XCTAssertFalse(CleanupRouteTransition.plan(from: nil, to: nil).contains(.stopEngine))
     }
+
+    // MARK: - EchoRiskLogic (built-in-speaker captions)
+
+    /// Full truth table: the warning fires ONLY for cleaning + built-in speaker + AEC inactive —
+    /// the one configuration where the far side hears themselves.
+    func testWarnBuiltInSpeakerEchoTruthTable() {
+        for cleaning in [false, true] {
+            for speaker in [false, true] {
+                for aec in [false, true] {
+                    let expected = cleaning && speaker && !aec
+                    XCTAssertEqual(
+                        EchoRiskLogic.shouldWarnBuiltInSpeakerEcho(cleaning: cleaning,
+                                                                   isBuiltInSpeaker: speaker,
+                                                                   voiceIOActive: aec),
+                        expected,
+                        "cleaning=\(cleaning) speaker=\(speaker) aec=\(aec)")
+                }
+            }
+        }
+    }
+
+    /// An active AEC extinguishes the warning even in the previously hazardous configuration.
+    func testActiveVoiceIOExtinguishesTheWarning() {
+        XCTAssertTrue(EchoRiskLogic.shouldWarnBuiltInSpeakerEcho(cleaning: true, isBuiltInSpeaker: true,
+                                                                 voiceIOActive: false))
+        XCTAssertFalse(EchoRiskLogic.shouldWarnBuiltInSpeakerEcho(cleaning: true, isBuiltInSpeaker: true,
+                                                                  voiceIOActive: true))
+    }
+
+    /// Full truth table: the suggestion fires ONLY for AEC active + built-in speaker + cleanup off.
+    func testSuggestCleanupOnSpeakerTruthTable() {
+        for aec in [false, true] {
+            for speaker in [false, true] {
+                for off in [false, true] {
+                    let expected = aec && speaker && off
+                    XCTAssertEqual(
+                        EchoRiskLogic.shouldSuggestCleanupOnSpeaker(voiceIOActive: aec,
+                                                                    isBuiltInSpeaker: speaker,
+                                                                    cleanupOff: off),
+                        expected,
+                        "aec=\(aec) speaker=\(speaker) cleanupOff=\(off)")
+                }
+            }
+        }
+    }
+
+    /// The two captions are mutually exclusive in every reachable state (cleaning == !cleanupOff).
+    func testWarnAndSuggestNeverBothVisible() {
+        for cleaning in [false, true] {
+            for speaker in [false, true] {
+                for aec in [false, true] {
+                    let warn = EchoRiskLogic.shouldWarnBuiltInSpeakerEcho(cleaning: cleaning,
+                                                                          isBuiltInSpeaker: speaker,
+                                                                          voiceIOActive: aec)
+                    let suggest = EchoRiskLogic.shouldSuggestCleanupOnSpeaker(voiceIOActive: aec,
+                                                                              isBuiltInSpeaker: speaker,
+                                                                              cleanupOff: !cleaning)
+                    XCTAssertFalse(warn && suggest,
+                                   "cleaning=\(cleaning) speaker=\(speaker) aec=\(aec)")
+                }
+            }
+        }
+    }
 }

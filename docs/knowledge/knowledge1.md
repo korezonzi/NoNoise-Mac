@@ -54,17 +54,19 @@ for the must-read failure modes.
   app can't correlate it with its reference, and the echo passes straight through NoNoise Mic into
   the call. This is a STRUCTURAL property of the re-render approach, not a bug: any app-side AEC
   is defeated by the inserted latency + device split.
-- **Rule**: with earphones (any kind) there is no acoustic loop — full pipeline is safe. On
-  speakers, either turn receive cleanup OFF (call app outputs to the real speaker; its AEC works
-  again) or use earphones. The UI warns while the hazardous combination is live:
+- **Rule (updated 2026-09-03)**: with earphones (any kind) there is no acoustic loop — full
+  pipeline is safe. On speakers the hazard applies only while our own AEC is NOT active: with
+  `voiceProcessingStatus == .active` (the VPIO backend, see the 2026-09-02 [DECISION]) the
+  cleanup playback is cancelled from our own capture and the warning is suppressed
+  (`EchoRiskLogic.shouldWarnBuiltInSpeakerEcho`, headless-tested). Without active AEC the old
+  rule stands: turn receive cleanup OFF on speakers or use earphones. Speaker detection:
   `AudioModel.defaultOutputIsBuiltInSpeaker` (transport 'bltn' + data source 'ispk' — combo-jack
   wired headphones report 'hdpn' and are excluded; the pure predicate is
   `VirtualMicRouting.isBuiltInSpeakerOutput`, headless-tested).
-- **Root fix direction (planned, not yet built)**: move the mic capture path onto Apple's Voice
-  Processing I/O (`AVAudioEngine.inputNode.isVoiceProcessingEnabled` / AUVoiceIO) and play the
-  receive-cleanup output through the paired output unit, so the OS-level AEC cancels our own
-  playback from our own capture (the Krisp approach). That is a capture-path re-architecture —
-  needs its own feasibility spike + plan before touching the shipping pipeline.
+- **Root fix (BUILT — Phase 2, 2026-09-03)**: mic capture moved onto Apple's Voice Processing I/O
+  (`VoiceIOEngine`, behind `mv.voiceProcessing`) and the receive-cleanup output plays through the
+  paired output unit, so the OS-level AEC cancels our own playback from our own capture (the
+  Krisp approach). See AGENTS.md's VPIO section for the architecture.
 - **Files**: `Sources/Core/AudioModel.swift` (`refreshDefaultOutputTransport`),
   `Sources/Core/AudioProcessing/VirtualMicRouting.swift` (`isBuiltInSpeakerOutput`),
   `Sources/App/ContentView.swift` (echo-guard caption in the incoming card).
