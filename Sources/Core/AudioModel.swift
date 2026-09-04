@@ -1162,6 +1162,13 @@ public class AudioModel: NSObject, ObservableObject {
             return
         }
 
+        // Boot race guard (field report 2026-09-04): at launch this runs from loadSettings() while
+        // `selectedInputDeviceID` is still "" — fetchInputDevices()' resolve is async — so a
+        // configure here can ONLY fail, and the failure cascaded to a STICKY `.failed`
+        // ("開始できませんでした") because nothing re-evaluated after the device resolved.
+        // Don't construct or fail; `applyInputSelection()` re-invokes this once a real UID lands.
+        guard !selectedInputDeviceID.isEmpty else { return }
+
         if voiceIOEngine == nil {
             let engine = VoiceIOEngine()
             wireOnAudio(engine)
@@ -1570,7 +1577,19 @@ public class AudioModel: NSObject, ObservableObject {
             defaultUID: AVCaptureDevice.default(for: .audio)?.uniqueID,
             current: selectedInputDeviceID.isEmpty ? nil : selectedInputDeviceID)
         let target = resolved ?? ""
-        if target != selectedInputDeviceID { selectedInputDeviceID = target }
+        let changed = target != selectedInputDeviceID
+        if changed { selectedInputDeviceID = target }
+
+        // VPIO (re)apply after device resolution — the second half of applyMicBackend()'s boot-race
+        // guard, and the retry trigger after a fallback when the INPUT DEVICE actually changed
+        // (e.g. a non-48k BT mic that forced .unsupportedInputRate was swapped for the built-in
+        // mic). Event-driven and bounded: a no-change refresh retries only out of `.failed` (the
+        // stale-status repair), never out of `.fallback` (avoids status flicker on every hardware
+        // refresh while a fallback reason legitimately persists).
+        if voiceProcessingEnabled, voiceIOEngine == nil, !target.isEmpty,
+           changed || voiceProcessingStatus == .failed {
+            applyMicBackend()
+        }
     }
 
     /// Returns whether `configure()` succeeded — `applyMicBackend()` reads this to know whether a

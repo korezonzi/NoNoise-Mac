@@ -5,6 +5,29 @@ for the must-read failure modes.
 
 ---
 
+### [GOTCHA] 2026-09-04 — VPIO enable at LAUNCH raced the async input-device resolve → sticky "開始できませんでした"
+- **Symptom**: with `mv.voiceProcessing` persisted ON, every app launch showed the beta card's
+  `.failed` caption; relaunching never cleared it, though the mic itself worked (AVCapture).
+- **Chain**: `loadSettings()` → `applyMicBackend()` runs while `selectedInputDeviceID == ""`
+  (fetchInputDevices resolves async ~1 s later) → VoiceIOEngine `configure("")` false →
+  `fallBackFromVoiceIO` → AVCapture `configure("")` ALSO false → `effectiveStatus(...,
+  avCaptureConfigured: false)` = `.failed`. The later device resolve re-configured the AVCapture
+  backend (didSet path) so audio recovered — but NOTHING re-evaluated `voiceProcessingStatus` or
+  retried VPIO. Same shape as the Phase-1 H-1 empty-UID finding; the status layer re-hit it.
+- **Fix**: `applyMicBackend()` early-returns on an empty UID (never construct/fail during the
+  boot race), and `applyInputSelection()` re-invokes it once a real UID lands — also the retry
+  trigger when the input DEVICE CHANGES after a `.fallback` (BT mic swapped for built-in), while
+  a no-change refresh retries only out of `.failed`, never `.fallback` (no status flicker).
+- **Rule**: any feature applied from `loadSettings()` that needs a RESOLVED input device must
+  either tolerate `""` as "not yet" or hook `applyInputSelection()` — launch-time didSet/apply
+  ordering guarantees the empty-UID window exists on every single launch.
+- **Related crash, same day**: the first enable attempt (2026-09-03) died in `installTap`
+  (`AUGraphNodeBaseV3::CreateRecordingTap` NSException → SIGABRT; Krisp was resident — suspected
+  but unconfirmed trigger). Swift cannot catch NSExceptions: the `CExceptionGuard` ObjC shim now
+  wraps the whole VPIO graph build, logging the reason to routeLog and degrading to AVCapture.
+  A dead NoNoise silences everything routed through NoNoise Speaker — the beta backend must
+  NEVER take down the process.
+
 ### [DECISION] 2026-09-02 — AEC feasibility spike PASSED: Voice Processing I/O cancels our playback (ERLE 50.7 dB) — GO for the VPIO capture re-architecture
 - **Harness**: `NoNoiseMacCLI --aec-spike <scenario>` (`Sources/Core/AudioProcessing/VoiceIOSpike.swift`
   + pure `AECSpikeAnalysis`). Measured on a MacBook Air (M-series), built-in mic + built-in
