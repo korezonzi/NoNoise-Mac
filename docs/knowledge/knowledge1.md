@@ -5,6 +5,39 @@ for the must-read failure modes.
 
 ---
 
+### [DECISION] 2026-09-28 — Team distribution: unsigned pkg + fixed "latest" link + Notion guide (no in-app updater)
+- **Context**: rolling NoNoise Mac out to non-engineer teammates (all Apple Silicon, macOS 14.4+).
+  Constraint from the owner: lowest possible friction, no Git knowledge assumed.
+- **Decision** (owner, 2026-09-28): stay **unsigned** (no Apple Developer Program for now);
+  distribute the one-click `NoNoiseMac.pkg` via **GitHub Releases on the public fork** as the source
+  of truth, with a **fixed link** `…/releases/latest/download/NoNoiseMac.pkg` (release.yml now
+  publishes an un-suffixed copy of the pkg for this), plus a manually refreshed **Google Drive**
+  mirror. The user guide lives in `docs/deploy/team-install.md` and is published to **Notion**
+  (screenshots of the Gatekeeper flow). The AEC beta stays OFF by default and is mentioned in the
+  guide as optional, with "turn it OFF if it howls".
+- **Facts that shaped it**: Sparkle was removed from this fork on 2026-07-17 (`e1bc8a6`), so there is
+  NO auto-update — every update is a re-download + the same Gatekeeper step. macOS 15+ removed the
+  right-click → Open bypass for unsigned software; the only GUI path is System Settings → Privacy &
+  Security → "Open Anyway" (JA: 「このまま開く」). `release.yml` still carried the Sparkle appcast
+  step, which would have FAILED every `v*` release on this fork (`generate_appcast` is not in
+  `.build`) — removed in the same change.
+- **Rule**: keep the un-suffixed `NoNoiseMac.pkg` asset on every versioned release (the guide links
+  only that URL). Do not re-add "right-click → Open" wording anywhere.
+- **Revisit when**: ≥2 teammates stall on the Gatekeeper step, OR monthly updates become routine →
+  enroll in Apple Developer Program, set `PKG_SIGN_IDENTITY` in CI, add `notarytool` + `stapler`
+  (build-pkg.sh already supports the signing identity; notarization is CI config, not a rework).
+
+### [GOTCHA] 2026-09-28 — Push/tag events never start GitHub Actions on this fork; only workflow_dispatch runs
+- **Symptom**: two pushes to `main` (5861931, 90338bc) produced ZERO workflow runs although
+  `gh workflow list` shows CI/Release `active` and `actions/permissions` says `enabled: true`.
+  `gh workflow run ci.yml --ref main` started a run immediately.
+- **Consequence**: `release.sh`'s tag push alone would never build a release. `release.sh` now
+  dispatches `release.yml` with `-f tag=<tag>` after pushing, and `ci.yml` gained
+  `workflow_dispatch` so CI can be started by hand (`gh workflow run ci.yml --ref main`).
+- **Rule**: after any push, start CI explicitly; never wait for a push-triggered run. Root cause
+  on GitHub's side is unknown (fork-level Actions gating not exposed via API) — if push runs ever
+  appear, the extra dispatched run is harmless (release.yml is idempotent).
+
 ### [GOTCHA] 2026-09-04 — VPIO enable at LAUNCH raced the async input-device resolve → sticky "開始できませんでした"
 - **Symptom**: with `mv.voiceProcessing` persisted ON, every app launch showed the beta card's
   `.failed` caption; relaunching never cleared it, though the mic itself worked (AVCapture).

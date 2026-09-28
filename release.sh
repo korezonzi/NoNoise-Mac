@@ -144,6 +144,18 @@ git push origin main "$TAG"
 echo "✅ Pushed!"
 echo ""
 
+# On this fork, push/tag events do NOT start GitHub Actions runs (verified 2026-09-28: two pushes to
+# main produced zero runs while workflow_dispatch works). Kick release.yml explicitly. If push
+# events ever start firing, the extra run is harmless — release.yml is idempotent (edit/--clobber).
+if command -v gh >/dev/null 2>&1; then
+  echo "🏁 Dispatching release.yml for $TAG (push events don't trigger workflows on this fork)"
+  gh workflow run release.yml --ref main -f tag="$TAG" || \
+    echo "⚠️  Dispatch failed — run manually: gh workflow run release.yml --ref main -f tag=$TAG"
+else
+  echo "⚠️  gh CLI not found — start the release manually: gh workflow run release.yml --ref main -f tag=$TAG"
+fi
+echo ""
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "✨ Release v$VERSION is on its way!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

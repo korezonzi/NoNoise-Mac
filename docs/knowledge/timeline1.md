@@ -2,6 +2,18 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-09-28 — Team distribution wiring: fixed-link pkg, dead Sparkle step removed, non-engineer guide
+- **What:** Prepared the first release from this fork for non-engineer teammates. `release.yml` now
+  also publishes an un-suffixed `NoNoiseMac.pkg` on every versioned release so the fixed link
+  `…/releases/latest/download/NoNoiseMac.pkg` always serves the newest installer; the leftover
+  Sparkle appcast steps (which would have failed every `v*` run — Sparkle left the fork on
+  2026-07-17) were removed; the install footer and README now describe the macOS 15+ Gatekeeper
+  path (System Settings → Privacy & Security → 「このまま開く」) instead of the retired
+  right-click → Open. In-app "run ./install-driver.sh" wording replaced with "re-run the pkg".
+  `docs/deploy/team-install.md` rewritten for non-engineers (no commands) and published to Notion;
+  `release.sh` links now derive from `origin` instead of the hardcoded upstream URL.
+- **Decision record:** knowledge1.md [DECISION] 2026-09-28 (unsigned for now, revisit conditions).
+
 ### 2026-09-01 — Built-in-speaker echo warning + DIAG logging replaced with os.Logger
 - **What:** Field-confirmed the mic fix (voice reaches the far side through a real Meet call with
   Bluetooth earphones), then diagnosed the reported echo/howling: receive cleanup playing through

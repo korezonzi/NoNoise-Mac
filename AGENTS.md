@@ -117,10 +117,14 @@ builds and tests. **Pushes to `main` do NOT publish a release** — releases are
 `.github/workflows/release.yml` publishes a GitHub release ONLY for `v*` tags whose commit is
 contained in `origin/main` (cut via `release.sh`), or a manual `workflow_dispatch`. Assets use
 tag-specific filenames (`NoNoiseMac-<tag>.app.zip`, `NoNoiseMacCLI-<tag>.zip`,
-`NoNoiseMic-driver-<tag>.zip`, `NoNoiseMac-<tag>.pkg`, `SHA256SUMS-<tag>.txt`). The `.pkg` (built by
-`build-pkg.sh`) is the one-click app+driver installer — unsigned until `PKG_SIGN_IDENTITY` is set in
-CI. The Sparkle `appcast` release is bootstrapped once by an admin (CI's token can upload to it but
-can't create its tag — see `docs/knowledge/knowledge1.md`). Do NOT re-add the `workflow_run` rolling
+`NoNoiseMic-driver-<tag>.zip`, `NoNoiseMac-<tag>.pkg`, `SHA256SUMS-<tag>.txt`) PLUS an un-suffixed
+copy `NoNoiseMac.pkg` so the fixed link `…/releases/latest/download/NoNoiseMac.pkg` always resolves
+to the newest installer — the team guide (`docs/deploy/team-install.md`) links ONLY that URL, so
+never drop or rename that asset. The `.pkg` (built by `build-pkg.sh`) is the one-click app+driver
+installer — unsigned until `PKG_SIGN_IDENTITY` is set in CI (team decision 2026-09-28: stay unsigned;
+revisit Developer ID + notarization if ≥2 members stall on the Gatekeeper step or monthly updates
+become routine). A Google Drive copy of the pkg is a MANUAL mirror refreshed per release; GitHub
+Releases is the source of truth. Do NOT re-add the `workflow_run` rolling
 `main-<short-sha>` "stable" releases: they stole GitHub's **Latest** badge from versioned releases
 and cluttered the Releases page. (A one-off stable build is still available via
 `workflow_dispatch` with tag `stable-latest`.) Also do NOT reintroduce a moving `stable` Git tag —
@@ -172,8 +176,13 @@ The script requires:
 - Version is semver (`major.minor.patch`, e.g. `1.3.0`)
 - The notes file is non-empty
 
-**What happens next:** CI builds arm64 binaries, bundles the app + CLI + driver, and publishes
-the GitHub release with your notes plus the standard install footer. Takes ~2–5 min.
+**What happens next:** `release.sh` pushes main + the tag AND dispatches `release.yml` via `gh`
+(**push/tag events do NOT start workflows on this fork** — verified 2026-09-28 — only
+`workflow_dispatch` runs; `ci.yml` therefore also has `workflow_dispatch`, start it with
+`gh workflow run ci.yml --ref main` after pushing). CI builds arm64 binaries, bundles the app +
+CLI + driver, and publishes the GitHub release with your notes plus the standard install footer.
+Takes ~10–15 min on the macOS runner. If a release run fails AFTER publishing (e.g. asset upload),
+re-dispatch with the same tag — the publish step is idempotent.
 
 ## Entitlements & signing
 `bundle.sh` codesigns with `Resources/NoNoiseMac.entitlements`, kept **intentionally minimal** —
@@ -185,22 +194,22 @@ exactly two keys:
 
 Do not add entitlements beyond these two without a measured, documented need.
 
-## Auto-update (Sparkle)
-- The app embeds **Sparkle 2** (SwiftPM, app target only). The updater is created at launch in
-  `NoNoiseMacApp.init()` (`UpdaterController`), same singleton rule as the other launch objects.
-- **`CFBundleVersion` is a MONOTONIC INTEGER** (`MAJOR*1000000+MINOR*1000+PATCH`), NOT semver —
-  Sparkle compares it against the installed bundle version. `scripts/version-from-tag.sh` is the
-  single source of that mapping (tested by `scripts/version-from-tag.test.sh`); **`release.sh` calls
-  it** to stamp `Info.plist`. Keep minor/patch < 1000. Do NOT reintroduce the old
-  `MAJOR.MINOR`-digits formula — it ignored PATCH and wasn't monotonic.
+## Auto-update (Sparkle) — REMOVED in this fork
+- **There is no in-app updater.** Sparkle was removed on 2026-07-17 (`e1bc8a6`): `Package.swift` has
+  no Sparkle dependency and `Sources/App/UpdaterController.swift` is a no-op stub that keeps the
+  "アップデートを確認" button permanently disabled. Users update by re-downloading the pkg from the
+  fixed link (see "CI & releases"); `release.yml` no longer generates or publishes an appcast.
+- **Inert leftovers — do not "fix" them:** `Resources/Info.plist` still carries `SUFeedURL` (pointing
+  at the UPSTREAM repo), `SUPublicEDKey`, `SUEnableAutomaticChecks`, `SUScheduledCheckInterval`.
+  Nothing reads them. If Sparkle is ever re-introduced, the feed URL MUST be re-pointed at this fork
+  first, or users would be served upstream's builds.
+- **`CFBundleVersion` is still a MONOTONIC INTEGER** (`MAJOR*1000000+MINOR*1000+PATCH`), NOT semver.
+  `scripts/version-from-tag.sh` is the single source of that mapping (tested by
+  `scripts/version-from-tag.test.sh`); **`release.sh` calls it** to stamp `Info.plist`. Keep the rule
+  even without Sparkle — macOS Installer and any future updater compare it. Keep minor/patch < 1000.
 - **Versioning is owned by `release.sh`** (it bumps + commits + tags). CI does NOT re-stamp; it
-  trusts the committed `Info.plist` and asserts plist↔tag↔appcast↔asset all agree.
-- **`bundle.sh` signs inside-out (never `--deep`):** nested Sparkle code gets `-o runtime`, the outer
-  app stays ad-hoc with no Hardened Runtime. `release.yml` signs the zip, runs `generate_appcast`,
-  asserts, and publishes `appcast.xml` to the fixed `appcast` release tag.
-- **`SUFeedURL`** (Info.plist) must equal `…/releases/download/appcast/appcast.xml`. Public EdDSA key
-  is in Info.plist (`SUPublicEDKey`); the **private key is the `SPARKLE_PRIVATE_KEY` GitHub secret**,
-  escrowed separately — losing it forces every user to reinstall, so never regenerate it casually.
+  trusts the committed `Info.plist`.
+- **`bundle.sh` signs ad-hoc, never `--deep`.** No Hardened Runtime, no notarization.
 
 ## Branding & identifier conventions (do not regress)
 - Display name: **NoNoise Mac**. Code identifier: **NoNoiseMac** (executable, SwiftPM
