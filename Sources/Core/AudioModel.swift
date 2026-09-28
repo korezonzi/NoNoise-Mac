@@ -899,10 +899,14 @@ public class AudioModel: NSObject, ObservableObject {
     private func executeCleanupRouteTransition<Engine: CleanupEngineLifecycle>(
         steps: [RouteMutation],
         existing: Engine?,
+        label: StaticString,
         makeEngine: (CleanupPlaybackTarget) -> Engine,
         onRuntimeFailure: @escaping (Engine) -> Void,
         apply: (Engine?) -> Void
     ) {
+        if !steps.isEmpty {
+            Self.routeLog.info("route.plan engine=\(label) steps=\(steps.count, privacy: .public)")
+        }
         var newEngine: Engine?
         for step in steps {
             switch step {
@@ -914,6 +918,7 @@ public class AudioModel: NSObject, ObservableObject {
                 let engine = makeEngine(target)
                 let built = (target == .ownEngine) ? engine.start() : engine.prepareCapture()
                 guard built else {
+                    Self.routeLog.info("route.step engine=\(label) step=buildEngine ok=0")
                     engine.stop()
                     apply(nil)
                     return
@@ -922,12 +927,14 @@ public class AudioModel: NSObject, ObservableObject {
             case .attachHook:
                 guard let engine = newEngine, let hook = engine.makeRenderHook(),
                       voiceIOEngine?.restart(withHook: hook, owner: engine) == true else {
+                    Self.routeLog.info("route.step engine=\(label) step=attachHook ok=0")
                     newEngine?.stop()
                     apply(nil)
                     return
                 }
             case .startIO:
                 guard let engine = newEngine, engine.startIO() else {
+                    Self.routeLog.info("route.step engine=\(label) step=startIO ok=0")
                     newEngine?.stop()
                     _ = voiceIOEngine?.detachHook()
                     apply(nil)
@@ -943,6 +950,9 @@ public class AudioModel: NSObject, ObservableObject {
                 guard let engine else { return }
                 onRuntimeFailure(engine)
             }
+        }
+        if !steps.isEmpty {
+            Self.routeLog.info("route.step engine=\(label) done ok=1")
         }
         apply(newEngine)
     }
@@ -974,7 +984,7 @@ public class AudioModel: NSObject, ObservableObject {
 
         let steps = CleanupRouteTransition.plan(from: existing?.playbackTarget, to: target)
         executeCleanupRouteTransition(
-            steps: steps, existing: existing,
+            steps: steps, existing: existing, label: "incoming",
             makeEngine: { IncomingCleanupEngine(playbackTarget: $0) },
             onRuntimeFailure: { [weak self] engine in
                 guard let self, self.incomingEngine === engine else { return }
@@ -1004,6 +1014,7 @@ public class AudioModel: NSObject, ObservableObject {
             return
         }
         let existing = incomingEngine as? IncomingCleanupEngine
+        Self.routeLog.info("route.teardown engine=incoming from=\(String(describing: existing?.playbackTarget), privacy: .public)")
         for step in CleanupRouteTransition.plan(from: existing?.playbackTarget, to: nil) {
             switch step {
             case .detachHook: _ = voiceIOEngine?.detachHook()
@@ -1064,7 +1075,7 @@ public class AudioModel: NSObject, ObservableObject {
             guard let self, self.speakerApplyGeneration == gen, self.speakerCleanupEnabled else { return }
             let steps = CleanupRouteTransition.plan(from: currentTarget, to: target)
             self.executeCleanupRouteTransition(
-                steps: steps, existing: existing,
+                steps: steps, existing: existing, label: "speaker",
                 makeEngine: { SpeakerCleanupEngine(playbackTarget: $0) },
                 onRuntimeFailure: { [weak self] engine in
                     guard let self, self.speakerEngine === engine else { return }
@@ -1091,6 +1102,7 @@ public class AudioModel: NSObject, ObservableObject {
     private func teardownSpeakerEngine(newStatus: SpeakerCleanupStatus) {
         speakerApplyGeneration &+= 1   // invalidate any in-flight deferred build
         let existing = speakerEngine
+        Self.routeLog.info("route.teardown engine=speaker from=\(String(describing: existing?.playbackTarget), privacy: .public)")
         for step in CleanupRouteTransition.plan(from: existing?.playbackTarget, to: nil) {
             switch step {
             case .detachHook: _ = voiceIOEngine?.detachHook()
@@ -1150,13 +1162,13 @@ public class AudioModel: NSObject, ObservableObject {
     private func applyMicBackend() {
         guard voiceProcessingEnabled else {
             guard voiceIOEngine != nil else {
-                if voiceProcessingStatus != .off { voiceProcessingStatus = .off }
+                if voiceProcessingStatus != .off { setVoiceProcessingStatus(.off, reason: "flagOffNoop") }
                 return
             }
             voiceIOEngine?.stop()
             voiceIOEngine = nil
             switchCaptureBackend(to: avCaptureBackend)
-            voiceProcessingStatus = .off
+            setVoiceProcessingStatus(.off, reason: "flagOff")
             setupCaptureSession()
             applyCleanupPlaybackRoute()
             return
@@ -1190,9 +1202,20 @@ public class AudioModel: NSObject, ObservableObject {
             // Configured successfully but idle (on-demand gate closed): no start was attempted, so
             // `startCurrentBackendAndHandleFailure()` never ran to finalize status. This IS the
             // confirmed outcome for this branch (configure succeeded), not an optimistic guess.
-            voiceProcessingStatus = .active
+            setVoiceProcessingStatus(.active, reason: "configuredIdle")
             applyCleanupPlaybackRoute()
         }
+    }
+
+    /// Central write path for `voiceProcessingStatus` — logs `vpio.status old= new= reason=` BEFORE
+    /// assigning (Phase 1 diagnostics for the AEC howling investigation, see the approved plan).
+    /// Deliberately logs redundant same→same writes too: which code path re-writes the same value,
+    /// and how often, is itself diagnostic information (e.g. how many times a route flaps without the
+    /// externally-visible status ever changing). Purely additive — the assignment itself is byte-for-
+    /// byte identical to the 5 direct writes this helper replaces.
+    private func setVoiceProcessingStatus(_ new: VoiceIOStatus, reason: StaticString) {
+        Self.routeLog.info("vpio.status old=\(String(describing: self.voiceProcessingStatus), privacy: .public) new=\(String(describing: new), privacy: .public) reason=\(reason)")
+        voiceProcessingStatus = new
     }
 
     /// Starts `currentBackend`, and — when it's `voiceIOEngine` — checks the (synchronous) outcome:
@@ -1218,7 +1241,7 @@ public class AudioModel: NSObject, ObservableObject {
         if let reason {
             fallBackFromVoiceIO(reason: reason)   // H1: actually switch to AVCapture, not just the status
         } else {
-            voiceProcessingStatus = .active
+            setVoiceProcessingStatus(.active, reason: "startSucceeded")
             applyCleanupPlaybackRoute()
         }
     }
@@ -1233,10 +1256,11 @@ public class AudioModel: NSObject, ObservableObject {
         switchCaptureBackend(to: avCaptureBackend)
         let configured = avCaptureBackend.configure(deviceUID: selectedInputDeviceID)
         if configured && shouldCapture { avCaptureBackend.start() }
-        voiceProcessingStatus = VoiceIOLogic.effectiveStatus(enabled: voiceProcessingEnabled,
+        setVoiceProcessingStatus(VoiceIOLogic.effectiveStatus(enabled: voiceProcessingEnabled,
                                                              voiceIORunning: false,
                                                              fallbackReason: reason,
-                                                             avCaptureConfigured: configured)
+                                                             avCaptureConfigured: configured),
+                                 reason: "fallBack")
         applyCleanupPlaybackRoute()
     }
 
@@ -1249,12 +1273,14 @@ public class AudioModel: NSObject, ObservableObject {
     private func verifyCleanupHealthAfterVoiceIORebuild() {
         if #available(macOS 14.4, *), let inc = incomingEngine as? IncomingCleanupEngine,
            inc.playbackTarget == .external, !inc.isCaptureAlive {
+            Self.routeLog.info("cleanup.healthAfterRebuild engine=incoming teardown=1")
             releaseIncomingEngine()
             incomingCleanupStatus = .failed
             applyCleanupPlaybackRoute()
             return
         }
         if let spk = speakerEngine, spk.playbackTarget == .external, !spk.isCaptureAlive {
+            Self.routeLog.info("cleanup.healthAfterRebuild engine=speaker teardown=1")
             releaseSpeakerEngine()
             speakerCleanupStatus = .failed
             applyCleanupPlaybackRoute()
@@ -1273,6 +1299,7 @@ public class AudioModel: NSObject, ObservableObject {
     private func applyCleanupPlaybackRoute() {
         let voiceIOActive = (voiceProcessingStatus == .active)
         let target = VoiceIOLogic.cleanupRoute(voiceIOActive: voiceIOActive, micInUse: shouldCapture).playbackTarget
+        Self.routeLog.info("route.decide voiceIOActive=\(voiceIOActive, privacy: .public) micInUse=\(self.shouldCapture, privacy: .public) target=\(String(describing: target), privacy: .public)")
         reconcileIncomingCleanup(desiredTarget: target)
         reconcileSpeakerCleanup(desiredTarget: target)
     }

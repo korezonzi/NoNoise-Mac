@@ -629,6 +629,7 @@ public final class SpeakerCleanupEngine {
     private func checkExternalHealth() {
         guard playbackTarget == .external, running else { return }
         guard IncomingTapLogic.repinDecision(tapAlive: isCaptureAlive) == .repin else {
+            AudioModel.routeLog.info("cleanup.health engine=speaker verdict=teardown")
             teardownAndNotifyFailure()
             return
         }

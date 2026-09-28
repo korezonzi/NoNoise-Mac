@@ -187,6 +187,7 @@ final class VoiceIOEngine: MicCaptureBackend {
     /// which the caller (`AudioModel.startCurrentBackendAndHandleFailure`) then misread as a FRESH
     /// failure (since `isRunning` was still false right after) and fell back prematurely.
     func start() {
+        AudioModel.routeLog.info("vpio.start running=\(self.engine.isRunning, privacy: .public)")
         wantsRunning = true
         guard !engine.isRunning else { return }
         restartWorkItem?.cancel()   // supersede any pending scheduled retry with an immediate attempt
@@ -195,6 +196,7 @@ final class VoiceIOEngine: MicCaptureBackend {
     }
 
     func stop() {
+        AudioModel.routeLog.info("vpio.stop running=\(self.engine.isRunning, privacy: .public)")
         wantsRunning = false
         restartWorkItem?.cancel()
         restartWorkItem = nil
@@ -213,11 +215,17 @@ final class VoiceIOEngine: MicCaptureBackend {
     /// failed.
     @discardableResult
     func restart(withHook hook: CleanupRenderHook?, owner: AnyObject?) -> Bool {
+        AudioModel.routeLog.info("vpio.hook attach present=\(hook != nil, privacy: .public) gateOpen=\(self.wantsRunning, privacy: .public)")
         teardown()
         hookBox.pointee = hook
         hookOwner = hook != nil ? owner : nil
-        guard wantsRunning else { return false }
-        return buildAndStart()
+        guard wantsRunning else {
+            AudioModel.routeLog.info("vpio.hook attach ok=0")
+            return false
+        }
+        let ok = buildAndStart()
+        AudioModel.routeLog.info("vpio.hook attach ok=\(ok, privacy: .public)")
+        return ok
     }
 
     /// Detach the current hook (render silence instead) WITHOUT touching `wantsRunning`. This is the
@@ -229,6 +237,7 @@ final class VoiceIOEngine: MicCaptureBackend {
     /// safe and cheaper.
     @discardableResult
     func detachHook() -> Bool {
+        AudioModel.routeLog.info("vpio.hook detach running=\(self.engine.isRunning, privacy: .public)")
         guard hookBox.pointee != nil || hookOwner != nil else { return true }   // nothing attached
         if engine.isRunning {
             return restart(withHook: nil, owner: nil)
@@ -363,6 +372,7 @@ final class VoiceIOEngine: MicCaptureBackend {
                 AudioModel.routeLog.error("VoiceIOEngine build raised NSException, falling back: \(exceptionDescription, privacy: .public)")
             }
             lastFailureReason = (buildError == .unsupportedInputRate) ? .unsupportedInputRate : .startFailed
+            AudioModel.routeLog.info("vpio.build ok=0 reason=\(self.lastFailureReason?.rawValue ?? "unknown", privacy: .public) exception=\(exceptionDescription != nil ? 1 : 0, privacy: .public)")
             return false
         }
 
@@ -371,6 +381,7 @@ final class VoiceIOEngine: MicCaptureBackend {
         consecutiveRestartFailures = 0
         lastFailureReason = nil
         onRebuilt?()
+        AudioModel.routeLog.info("vpio.build ok=1")
         return true
     }
 
@@ -480,6 +491,7 @@ final class VoiceIOEngine: MicCaptureBackend {
         guard wantsRunning, !engine.isRunning else { return }
         restartWorkItem?.cancel()
         let delay = Self.restartDelays[min(consecutiveRestartFailures, Self.restartDelays.count - 1)]
+        AudioModel.routeLog.info("vpio.restart schedule delay=\(delay, privacy: .public) failures=\(self.consecutiveRestartFailures, privacy: .public)")
         let item = DispatchWorkItem { [weak self] in self?.attemptRestart() }
         restartWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
@@ -489,10 +501,13 @@ final class VoiceIOEngine: MicCaptureBackend {
         guard wantsRunning, !engine.isRunning else { return }
         if rebuild() {
             consecutiveRestartFailures = 0
+            AudioModel.routeLog.info("vpio.restart attempt ok=1 failures=0 action=none")
             return
         }
         consecutiveRestartFailures += 1
-        switch VoiceIOLogic.startFailureAction(consecutiveFailures: consecutiveRestartFailures) {
+        let action = VoiceIOLogic.startFailureAction(consecutiveFailures: consecutiveRestartFailures)
+        AudioModel.routeLog.info("vpio.restart attempt ok=0 failures=\(self.consecutiveRestartFailures, privacy: .public) action=\(String(describing: action), privacy: .public)")
+        switch action {
         case .retry:
             scheduleRestart()
         case .giveUp:
