@@ -44,6 +44,8 @@ if [ -z "$VERSION" ]; then
 fi
 
 TAG="v$VERSION"
+# Human-facing links must point at THIS repo (fork), not the hardcoded upstream.
+REPO_URL="$(git remote get-url origin | sed -E 's#^git@github\.com:#https://github.com/#; s#\.git$##')"
 
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Error: Version must be in semver format (e.g., 1.2.0)"
@@ -147,7 +149,7 @@ echo "✨ Release v$VERSION is on its way!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "GitHub Actions is building binaries now..."
-echo "Watch progress: https://github.com/ivalsaraj/NoNoise-Mac/actions"
+echo "Watch progress: $REPO_URL/actions"
 echo ""
 echo "Release will be available in ~2-5 min at:"
-echo "https://github.com/ivalsaraj/NoNoise-Mac/releases/tag/$TAG"
+echo "$REPO_URL/releases/tag/$TAG"

@@ -439,7 +439,7 @@ struct ContentView: View {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("NoNoise Mic が未インストールです").font(.caption).fontWeight(.medium)
-                    Text("仮想マイクを追加するには ./install-driver.sh を実行してください。")
+                    Text("配布された NoNoiseMac.pkg をもう一度実行すると追加されます。")
                         .font(.caption2).foregroundColor(.secondary)
                 }
             }

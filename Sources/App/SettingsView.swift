@@ -836,7 +836,7 @@ struct GuideView: View {
                     .padding(.bottom, 2)
 
                 StepRow(number: 1, title: "NoNoise Mic をインストール",
-                        description: "./build-driver.sh → sudo ./install-driver.sh を一度だけ実行します。どのアプリからも選べる仮想マイク「NoNoise Mic」が追加されます（BlackHole不要）。")
+                        description: "配布された NoNoiseMac.pkg でインストール済みなら完了しています。どのアプリからも選べる仮想マイク「NoNoise Mic」が追加されます（BlackHole不要）。")
                 Divider()
                 StepRow(number: 2, title: "入力: 実際のマイクを選ぶ",
                         description: "入力デバイスに物理マイク（内蔵マイクやUSBマイク）を選びます。出力は自動です — 処理済み音声は内部の「NoNoise Mic Engine」へ送られるため、出力デバイスを選ぶ必要はありません。")
