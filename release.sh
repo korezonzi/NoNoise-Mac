@@ -46,6 +46,7 @@ fi
 TAG="v$VERSION"
 # Human-facing links must point at THIS repo (fork), not the hardcoded upstream.
 REPO_URL="$(git remote get-url origin | sed -E 's#^git@github\.com:#https://github.com/#; s#\.git$##')"
+REPO_SLUG="${REPO_URL#https://github.com/}"   # owner/repo — gh must target the fork, NOT its upstream default
 
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Error: Version must be in semver format (e.g., 1.2.0)"
@@ -149,10 +150,10 @@ echo ""
 # events ever start firing, the extra run is harmless — release.yml is idempotent (edit/--clobber).
 if command -v gh >/dev/null 2>&1; then
   echo "🏁 Dispatching release.yml for $TAG (push events don't trigger workflows on this fork)"
-  gh workflow run release.yml --ref main -f tag="$TAG" || \
-    echo "⚠️  Dispatch failed — run manually: gh workflow run release.yml --ref main -f tag=$TAG"
+  gh workflow run release.yml -R "$REPO_SLUG" --ref main -f tag="$TAG" || \
+    echo "⚠️  Dispatch failed — run manually: gh workflow run release.yml -R $REPO_SLUG --ref main -f tag=$TAG"
 else
-  echo "⚠️  gh CLI not found — start the release manually: gh workflow run release.yml --ref main -f tag=$TAG"
+  echo "⚠️  gh CLI not found — start the release manually: gh workflow run release.yml -R $REPO_SLUG --ref main -f tag=$TAG"
 fi
 echo ""
 

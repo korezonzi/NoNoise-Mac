@@ -179,7 +179,8 @@ The script requires:
 **What happens next:** `release.sh` pushes main + the tag AND dispatches `release.yml` via `gh`
 (**push/tag events do NOT start workflows on this fork** — verified 2026-09-28 — only
 `workflow_dispatch` runs; `ci.yml` therefore also has `workflow_dispatch`, start it with
-`gh workflow run ci.yml --ref main` after pushing). CI builds arm64 binaries, bundles the app +
+`gh workflow run ci.yml -R korezonzi/NoNoise-Mac --ref main` after pushing — ALWAYS pass `-R`: with two
+remotes, a bare `gh` resolves to the UPSTREAM repo and fails with HTTP 403). CI builds arm64 binaries, bundles the app +
 CLI + driver, and publishes the GitHub release with your notes plus the standard install footer.
 Takes ~10–15 min on the macOS runner. If a release run fails AFTER publishing (e.g. asset upload),
 re-dispatch with the same tag — the publish step is idempotent.

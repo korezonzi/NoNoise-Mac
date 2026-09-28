@@ -33,7 +33,10 @@ for the must-read failure modes.
   `gh workflow run ci.yml --ref main` started a run immediately.
 - **Consequence**: `release.sh`'s tag push alone would never build a release. `release.sh` now
   dispatches `release.yml` with `-f tag=<tag>` after pushing, and `ci.yml` gained
-  `workflow_dispatch` so CI can be started by hand (`gh workflow run ci.yml --ref main`).
+  `workflow_dispatch` so CI can be started by hand (`gh workflow run ci.yml -R korezonzi/NoNoise-Mac
+  --ref main`). Pass `-R` on every `gh` call in this checkout: with `origin` (fork) + `upstream`
+  remotes, a bare `gh` resolved to upstream and the first dispatch failed with HTTP 403
+  (`gh repo set-default korezonzi/NoNoise-Mac` was run locally on 2026-09-28 as a belt-and-braces fix).
 - **Rule**: after any push, start CI explicitly; never wait for a push-triggered run. Root cause
   on GitHub's side is unknown (fork-level Actions gating not exposed via API) — if push runs ever
   appear, the extra dispatched run is harmless (release.yml is idempotent).
