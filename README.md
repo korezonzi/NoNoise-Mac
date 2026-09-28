@@ -55,7 +55,7 @@
 インストーラがアプリ（/Applications）と仮想オーディオドライバを一括導入します。**導入時に全音声が約3秒途切れます**（オーディオシステム再起動のため・正常です）。
 
 自動更新はありません。新しい版が出たら同じ固定リンクから再ダウンロードしてください。
-スクリーンショット付きの手順・トラブルシュートは [`docs/deploy/team-install.md`](docs/deploy/team-install.md)（Notion 版もあり）へ。
+スクリーンショット付きの手順・トラブルシュートは [`docs/deploy/team-install.md`](docs/deploy/team-install.md)（社内向け Notion 版: https://app.notion.com/p/3e98b78a794481308fcdfdbb31216586 ）へ。
 
 ### ソースからビルド（開発者向け）
 
