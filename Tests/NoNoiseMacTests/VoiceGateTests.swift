@@ -112,7 +112,7 @@ final class VoiceGateTests: XCTestCase {
 
     func testLowLevelStaysOpenHighLevelCloses() {
         let loud = tone(dbfs: -12, seconds: 1)
-        let quiet = tone(dbfs: -38, seconds: 1)
+        let quiet = tone(dbfs: -27, seconds: 1)
 
         var low = makeGate(level: .low)
         for x in loud { _ = low.process(x) }
@@ -120,7 +120,7 @@ final class VoiceGateTests: XCTestCase {
         for i in 0..<quiet.count { lowYs[i] = low.process(quiet[i]) }
         let lowRatios = windowedPeakRatios(x: quiet[...], y: lowYs[...])
         XCTAssertTrue(lowRatios.allSatisfy { $0 >= 0.9 },
-                     "low must stay open on -38 dBFS after loud speech (inside its hysteresis band)")
+                     "low must stay open on -27 dBFS after loud speech (above its close threshold -30)")
 
         var high = makeGate(level: .high)
         for x in loud { _ = high.process(x) }
@@ -132,7 +132,7 @@ final class VoiceGateTests: XCTestCase {
         let idx600 = Int(0.6 * sr)
         let highRatios = windowedPeakRatios(x: quiet[idx600...], y: highYs[idx600...])
         XCTAssertTrue(highRatios.allSatisfy { $0 <= 0.01 },
-                     "high must close on -38 dBFS after loud speech (below its close threshold)")
+                     "high must close on -27 dBFS after loud speech (below its close threshold -22)")
     }
 
     // MARK: - 5. Hold bridges a short silence gap
@@ -208,8 +208,8 @@ final class VoiceGateTests: XCTestCase {
 
         reconfigure(&g, level: .high)   // same params, still enabled — must be a no-op on state
 
-        // -33 dBFS discriminates the two outcomes: with the LEARNED peak (-12 dBFS → open -24 /
-        // close -30) it sits below the close threshold and the gate must close; on a FRESH gate
+        // -33 dBFS discriminates the two outcomes: with the LEARNED peak (-12 dBFS → open -18 /
+        // close -22) it sits below the close threshold and the gate must close; on a FRESH gate
         // (open threshold = absolute floor -36) it would OPEN. So a reconfigure that wrongly
         // cleared `peakDb` fails this test instead of passing by accident.
         let quiet = tone(dbfs: -33, seconds: 1)

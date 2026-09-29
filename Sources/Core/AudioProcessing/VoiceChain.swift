@@ -148,9 +148,9 @@ public enum VoiceGateLevel: String, CaseIterable, Identifiable, Codable, Sendabl
     public var marginDb: Float {
         switch self {
         case .off:    return 0
-        case .low:    return 24
-        case .medium: return 18
-        case .high:   return 12
+        case .low:    return 12
+        case .medium: return 8
+        case .high:   return 6
         }
     }
 
@@ -182,7 +182,8 @@ public enum VoiceGateLevel: String, CaseIterable, Identifiable, Codable, Sendabl
     public var hysteresisDb: Float {
         switch self {
         case .off:                 return 0
-        case .low, .medium, .high: return 6
+        case .low:          return 6
+        case .medium, .high: return 4
         }
     }
 

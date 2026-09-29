@@ -427,7 +427,8 @@ public struct DeClick {
 ///   4. A hold-based state machine (`closed` → `open` → `hold` → `closed`) requires the envelope
 ///      to stay below `closeDb` for `holdMs` before the gate actually closes, so a brief dip
 ///      inside the wearer's own speech (a pause between words) doesn't clip the next syllable.
-///      While `.hold`, an envelope back above `closeDb` returns to `.open` and cancels the close.
+///      While `.hold`, an envelope back above `openDb` returns to `.open` and cancels the close
+///      (re-arming at `closeDb` would let an interferer hovering near it keep the gate open).
 ///   5. Gain target is 0 dB in `.open`/`.hold`, `floorDb` in `.closed`; smoothed IN THE DB DOMAIN
 ///      (mirrors `Compressor.envDb`) — `gainDb` one-pole toward the target (`attackMs` while
 ///      rising/opening, `releaseMs` while falling/closing) — then converted with
@@ -528,7 +529,10 @@ public struct VoiceGate {
                 holdCounter = holdSamples
             }
         case .hold:
-            if envDb >= closeDb {
+            // Re-open only at the OPEN threshold, not the close threshold: an interferer hovering
+            // just above `closeDb` would otherwise keep refreshing the hold and the gate would
+            // never actually close. The wearer's own syllable onsets clear `openDb` easily.
+            if envDb >= openDb {
                 state = .open
             } else if holdCounter > 0 {
                 holdCounter -= 1

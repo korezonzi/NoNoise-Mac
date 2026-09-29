@@ -11,7 +11,10 @@ Chronological log of notable changes. Newest on top.
   limiter in. `VoiceGateLevel` (Off/Low/Medium/High) on `VoiceChainSettings`, persisted `mv.voiceGate`
   (reset policy + VoiceProfile optional), popover/Settings cards「周囲の声を抑える」, CLI `--voice-gate`
   for offline A/B. 18 new tests (404 total). Review fixes: limiter-exclusion test now uses 0.95 amplitude,
-  reset-group and carry-state tests, profile round-trip, bit-exact off passthrough.
+  reset-group and carry-state tests, profile round-trip, bit-exact off passthrough. Retuned on synthetic
+  mixes (TTS target + interferer at −12/−15/−20 dB, `~/dev/90-scratch/2026/0930-tse-spike/synth_data`):
+  margins 6/8/12 dB and hold re-open at the OPEN threshold — before that, an interferer hovering near
+  the close threshold kept refreshing the hold and High only gained ~3 dB.
 - **Caveat:** mutes other talkers only while the wearer is silent; overlapped speech still passes.
   True target-speaker extraction is the separate go/no-go spike (`~/dev/90-scratch/2026/0930-tse-spike/`).
 
