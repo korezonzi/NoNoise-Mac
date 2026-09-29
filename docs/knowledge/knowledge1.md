@@ -5,6 +5,23 @@ for the must-read failure modes.
 
 ---
 
+### [GOTCHA] 2026-09-29 — DeepFilterNet keeps OTHER talkers by design; `.auto` drifts to `.weak` in babble
+- **Symptom** (first team rollout, headset mic, open office): music/typing/ambient noise removed, but
+  colleagues talking 1–2 m away pass straight through to the call.
+- **Root cause**: DFN3 separates speech from non-speech; the authors state it has no target-speaker
+  mechanism and preserves every prominent talker (arXiv 2206.11567). `suppressionStrength` /
+  `attenuationLimitDb` only scale how much NOISE is removed. Nothing in `VoiceChain` gates level
+  (`DePlosive`/`DeClick` are transient-only); the model's `mask`/`lsnr` outputs are unused and cannot
+  tell talkers apart either.
+- **Compounding factor**: `AutoStrengthController` keys off `aiActivity` (how much the model removed).
+  Babble is speech → the model removes little → activity < `weakUpperBound` (0.12) → after the 30 s EMA
+  the stage falls to `.weak`, i.e. the LEAST suppression exactly when the user wants the most.
+- **Rule**: do not "tune" DFN parameters for this — they cannot help. Guide now tells open-office users to
+  pick 「強」. The structural mitigations are (a) the level-based `VoiceGate` stage (adaptive threshold,
+  mutes non-target speech only while the user is silent — see AGENTS.md "Voice polish chain") and (b)
+  Apple Voice Isolation via the VPIO path (mic modes apply only to voice-processing apps); (c) true
+  target-speaker extraction is a go/no-go research spike (`~/dev/90-scratch/2026/0930-tse-spike/`).
+
 ### [DECISION] 2026-09-28 — Team distribution: unsigned pkg + fixed "latest" link + Notion guide (no in-app updater)
 - **Context**: rolling NoNoise Mac out to non-engineer teammates (all Apple Silicon, macOS 14.4+).
   Constraint from the owner: lowest possible friction, no Git knowledge assumed.
