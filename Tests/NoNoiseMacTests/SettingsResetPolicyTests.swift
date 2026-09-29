@@ -2,6 +2,11 @@ import XCTest
 @testable import Core
 
 final class SettingsResetPolicyTests: XCTestCase {
+    func testResettableKeysIncludesVoiceGate() {
+        XCTAssertTrue(SettingsResetPolicy.resettableKeys.contains(SettingsResetPolicy.voiceGateKey))
+        XCTAssertEqual(SettingsResetPolicy.voiceGateKey, "mv.voiceGate")
+    }
+
     func testResetRemovesAudioSettingsButPreservesProfilesAndHotkeys() throws {
         let suiteName = "SettingsResetPolicyTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

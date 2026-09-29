@@ -2,6 +2,19 @@
 
 Chronological log of notable changes. Newest on top.
 
+### 2026-09-29 — VoiceGate: level-based "other talkers" gate for headset mics (opt-in)
+- **What:** First team feedback: DFN removes noise but keeps colleagues' voices 1–2 m away (by design —
+  see the knowledge GOTCHA). Added `VoiceGate` (Dynamics.swift), a downward expander with an ADAPTIVE
+  threshold `max(absoluteFloor, learnedSpeakerPeak − margin)`, 6 dB hysteresis, 150–250 ms hold and
+  dB-domain gain smoothing (constant ~145 dB/s release, closes within ~0.4 s regardless of floor depth).
+  Placed after de-click and BEFORE the compressor; attenuation-only, so gate-only mode never pulls the
+  limiter in. `VoiceGateLevel` (Off/Low/Medium/High) on `VoiceChainSettings`, persisted `mv.voiceGate`
+  (reset policy + VoiceProfile optional), popover/Settings cards「周囲の声を抑える」, CLI `--voice-gate`
+  for offline A/B. 18 new tests (404 total). Review fixes: limiter-exclusion test now uses 0.95 amplitude,
+  reset-group and carry-state tests, profile round-trip, bit-exact off passthrough.
+- **Caveat:** mutes other talkers only while the wearer is silent; overlapped speech still passes.
+  True target-speaker extraction is the separate go/no-go spike (`~/dev/90-scratch/2026/0930-tse-spike/`).
+
 ### 2026-09-28 — Team distribution wiring: fixed-link pkg, dead Sparkle step removed, non-engineer guide
 - **What:** Prepared the first release from this fork for non-engineer teammates. `release.yml` now
   also publishes an un-suffixed `NoNoiseMac.pkg` on every versioned release so the fixed link

@@ -27,6 +27,7 @@ struct ContentView: View {
             clarityCard
             incomingCard
             mouthNoiseCard
+            voiceGateCard
             devicesCard
             driverStatusRow
             micPermissionRow
@@ -345,6 +346,22 @@ struct ContentView: View {
             cardLabel("リップノイズ除去", systemImage: "mouth.fill")
             Picker("", selection: $audioModel.mouthNoiseLevel) {
                 ForEach(MouthNoiseLevel.allCases) { level in
+                    Text(level.label).tag(level)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+        }
+        .nnCard()
+    }
+
+    // MARK: - Voice Gate
+
+    private var voiceGateCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            cardLabel("周囲の声を抑える", systemImage: "person.2.slash")
+            Picker("", selection: $audioModel.voiceGateLevel) {
+                ForEach(VoiceGateLevel.allCases) { level in
                     Text(level.label).tag(level)
                 }
             }

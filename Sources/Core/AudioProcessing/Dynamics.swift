@@ -408,3 +408,139 @@ public struct DeClick {
         return x * gain
     }
 }
+
+/// Adaptive-threshold downward expander ("voice gate") for headset-mic use: while the wearer is
+/// NOT speaking, other people's voices also picked up by the mic are attenuated. DeepFilterNet
+/// keeps all speech energy intact, so this stage runs AFTER the DFN output and decides purely
+/// from LEVEL — it has no notion of speaker identity, only of loudness relative to the wearer's
+/// own established speaking level.
+///
+/// Per-sample algorithm:
+///   1. `env` — a one-pole follower of `abs(x)` (fast `envAttackMs` rise / `envReleaseMs` fall),
+///      converted to `envDb = 20·log10(env)`: the instantaneous loudness estimate.
+///   2. `peakDb` — a SLOW one-pole follower of `envDb` (`peakAttackMs` rise / very slow
+///      `peakReleaseMs` fall, starts at −100 dB). With a headset mic the wearer is reliably the
+///      loudest talker, so this converges on and holds the WEARER's speaking level — the very
+///      slow release means a quiet stretch (someone else talking, or silence) doesn't erode it.
+///   3. `openDb = max(absoluteFloorDb, peakDb − marginDb)`; `closeDb = openDb − hysteresisDb`.
+///      Hysteresis keeps the gate from chattering right at the boundary.
+///   4. A hold-based state machine (`closed` → `open` → `hold` → `closed`) requires the envelope
+///      to stay below `closeDb` for `holdMs` before the gate actually closes, so a brief dip
+///      inside the wearer's own speech (a pause between words) doesn't clip the next syllable.
+///      While `.hold`, an envelope back above `closeDb` returns to `.open` and cancels the close.
+///   5. Gain target is 0 dB in `.open`/`.hold`, `floorDb` in `.closed`; smoothed IN THE DB DOMAIN
+///      (mirrors `Compressor.envDb`) — `gainDb` one-pole toward the target (`attackMs` while
+///      rising/opening, `releaseMs` while falling/closing) — then converted with
+///      `gain = 10^(gainDb/20)` and applied as `x * gain`. Smoothing in dB (not linear gain) makes
+///      the release rate a constant dB/s regardless of how deep `floorDb` is, so a shallow floor
+///      (e.g. Low's −15 dB) and a deep floor (High's −60 dB) settle in the same number of
+///      `releaseMs` time constants instead of the deep floor taking many times longer.
+///
+/// **Attenuation-only:** `gainDb` is always in `[floorDb, 0]` — this stage never raises level, so
+/// it must not (and does not) pull in the shared voice-chain limiter (see `VoiceChain.process`).
+///
+/// **Carry-state contract (mirrors `DeEsser`/`DePlosive`/`DeClick`):** `configure(enabled: true)`
+/// updates coefficients/thresholds ONLY — it never clears runtime state (`env`, `peakDb`, `state`,
+/// `holdCounter`, `gainDb`). Only `reset()` and the disabled arm clear it, so an unrelated
+/// reconfigure (e.g. a different setting layered on the same chain) is bumpless.
+///
+/// **Documented caveat:** this is a level-based gate, not a diarization system. It does NOT
+/// remove another talker's voice WHILE the wearer is also speaking — both pass together once the
+/// combined level is above the open threshold.
+public struct VoiceGate {
+    private enum GateState { case closed, open, hold }
+
+    private var enabled = false
+    private var marginDb: Float = 18
+    private var absoluteFloorDb: Float = -100
+    private var hysteresisDb: Float = 0
+    private var floorDb: Float = 0
+    private var attackCoeff: Float = 0
+    private var releaseCoeff: Float = 0
+    private var envAttackCoeff: Float = 0
+    private var envReleaseCoeff: Float = 0
+    private var peakAttackCoeff: Float = 0
+    private var peakReleaseCoeff: Float = 0
+    private var holdSamples: Int = 0
+
+    private var env: Float = 0
+    private var peakDb: Float = -100
+    private var state: GateState = .closed
+    private var holdCounter: Int = 0
+    private var gainDb: Float = 0
+
+    public init() {}
+
+    public mutating func configure(marginDb: Float, absoluteFloorDb: Float, hysteresisDb: Float,
+                                   floorDb: Float, attackMs: Float, holdMs: Float, releaseMs: Float,
+                                   envAttackMs: Float, envReleaseMs: Float,
+                                   peakAttackMs: Float, peakReleaseMs: Float,
+                                   sampleRate: Float, enabled: Bool) {
+        self.enabled = enabled
+        guard enabled else { reset(); return }
+        self.marginDb = marginDb
+        self.absoluteFloorDb = absoluteFloorDb
+        self.hysteresisDb = max(0, hysteresisDb)
+        self.floorDb = floorDb
+        attackCoeff  = expf(-1.0 / (max(attackMs,  0.01) * 0.001 * sampleRate))
+        releaseCoeff = expf(-1.0 / (max(releaseMs, 0.01) * 0.001 * sampleRate))
+        envAttackCoeff  = expf(-1.0 / (max(envAttackMs,  0.01) * 0.001 * sampleRate))
+        envReleaseCoeff = expf(-1.0 / (max(envReleaseMs, 0.01) * 0.001 * sampleRate))
+        peakAttackCoeff  = expf(-1.0 / (max(peakAttackMs,  0.01) * 0.001 * sampleRate))
+        peakReleaseCoeff = expf(-1.0 / (max(peakReleaseMs, 0.01) * 0.001 * sampleRate))
+        holdSamples = Int(max(holdMs, 0) * 0.001 * sampleRate)
+        // NOTE: runtime detector state is intentionally NOT cleared here (bumpless on unrelated
+        // reconfigures). Clearing happens only in reset() / the disabled arm.
+    }
+
+    /// Clear all runtime state to a fresh, unlearned gate. `gainDb` resets to 0 (unity, not
+    /// `floorDb`) so a freshly (re)activated chain never ducks the very first syllable while it's
+    /// still learning the wearer's speaking level.
+    public mutating func reset() {
+        env = 0
+        peakDb = -100
+        state = .closed
+        holdCounter = 0
+        gainDb = 0
+    }
+
+    @inline(__always)
+    public mutating func process(_ x: Float) -> Float {
+        guard enabled else { return x }
+        let mag = abs(x)
+
+        let eCoeff = mag > env ? envAttackCoeff : envReleaseCoeff
+        env = eCoeff * env + (1 - eCoeff) * mag
+        let envDb = 20 * log10f(max(env, 1e-9))
+
+        let pCoeff = envDb > peakDb ? peakAttackCoeff : peakReleaseCoeff
+        peakDb = pCoeff * peakDb + (1 - pCoeff) * envDb
+
+        let openDb = max(absoluteFloorDb, peakDb - marginDb)
+        let closeDb = openDb - hysteresisDb
+
+        switch state {
+        case .closed:
+            if envDb >= openDb { state = .open }
+        case .open:
+            if envDb < closeDb {
+                state = .hold
+                holdCounter = holdSamples
+            }
+        case .hold:
+            if envDb >= closeDb {
+                state = .open
+            } else if holdCounter > 0 {
+                holdCounter -= 1
+            } else {
+                state = .closed
+            }
+        }
+
+        let targetDb: Float = state == .closed ? floorDb : 0
+        let coeff = targetDb > gainDb ? attackCoeff : releaseCoeff
+        gainDb = coeff * gainDb + (1 - coeff) * targetDb
+        let gain = powf(10, gainDb / 20)
+        return x * gain
+    }
+}

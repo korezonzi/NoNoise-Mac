@@ -299,6 +299,17 @@ public class AudioModel: NSObject, ObservableObject {
         }
     }
 
+    /// Voice Gate level (adaptive-threshold downward expander for headset-mic use). Layered on
+    /// top of the active preset, independent of the noise preset, Voice Polish, Broadcast Voice,
+    /// and Mouth Noise. Guarded by `isApplyingPreset` like all other knobs.
+    @Published public var voiceGateLevel: VoiceGateLevel = .off {
+        didSet {
+            guard !isApplyingPreset else { return }
+            applyVoiceChain()
+            persistSettings()
+        }
+    }
+
     /// App-level pre-DSP input trim (25%…100%). Does not write macOS hardware volume.
     private var realtimeInputVolume: Float = SmartLevelController.defaultInputVolume
 
@@ -411,6 +422,7 @@ public class AudioModel: NSObject, ObservableObject {
         static let voicePolish = SettingsResetPolicy.voicePolishKey
         static let clarity = SettingsResetPolicy.clarityKey
         static let mouthNoise = SettingsResetPolicy.mouthNoiseKey
+        static let voiceGate = SettingsResetPolicy.voiceGateKey
         static let inputVolume = SettingsResetPolicy.inputVolumeKey
         static let smartLevel = SettingsResetPolicy.smartLevelKey
         static let incomingEnabled = SettingsResetPolicy.incomingEnabledKey
@@ -626,6 +638,7 @@ public class AudioModel: NSObject, ObservableObject {
         s.enabled = s.enabled && voicePolishEnabled
         s.clarity = clarityLevel
         s.mouthNoiseLevel = mouthNoiseLevel
+        s.voiceGateLevel = voiceGateLevel
         s.loudnessActive = loudnessNormEnabled   // activate the chain for normalization
         voiceChain.configure(s)
     }
@@ -664,7 +677,8 @@ public class AudioModel: NSObject, ObservableObject {
             inputVolumeValue: inputVolumeValue,
             smartLevelEnabled: smartLevelEnabled,
             loudnessNormEnabled: loudnessNormEnabled,
-            loudnessTargetLUFS: loudnessTargetLUFS
+            loudnessTargetLUFS: loudnessTargetLUFS,
+            voiceGateLevel: voiceGateLevel
         )
         var store = VoiceProfileStore.from(profiles)
         store.upsert(profile)
@@ -694,6 +708,9 @@ public class AudioModel: NSObject, ObservableObject {
         clarityLevel = profile.clarityLevel
         if let mouthNoise = profile.mouthNoiseLevel {
             mouthNoiseLevel = mouthNoise
+        }
+        if let gate = profile.voiceGateLevel {
+            voiceGateLevel = gate
         }
         if let inputVolume = profile.inputVolumeValue {
             inputVolumeValue = SmartLevelController.clampInputVolume(inputVolume)
@@ -751,6 +768,7 @@ public class AudioModel: NSObject, ObservableObject {
         d.set(voicePolishEnabled, forKey: PrefKey.voicePolish)
         d.set(clarityLevel.rawValue, forKey: PrefKey.clarity)
         d.set(mouthNoiseLevel.rawValue, forKey: PrefKey.mouthNoise)
+        d.set(voiceGateLevel.rawValue, forKey: PrefKey.voiceGate)
         d.set(inputVolumeValue, forKey: PrefKey.inputVolume)
         d.set(smartLevelEnabled, forKey: PrefKey.smartLevel)
         d.set(loudnessNormEnabled, forKey: PrefKey.loudnessNorm)
@@ -770,6 +788,7 @@ public class AudioModel: NSObject, ObservableObject {
         voicePolishEnabled = true
         clarityLevel = .off
         mouthNoiseLevel = .off
+        voiceGateLevel = .off
         inputVolumeValue = SmartLevelController.defaultInputVolume
         smartLevelEnabled = false
         incomingCleanupEnabled = false
@@ -838,6 +857,7 @@ public class AudioModel: NSObject, ObservableObject {
         voicePolishEnabled = d.object(forKey: PrefKey.voicePolish) as? Bool ?? true
         clarityLevel = ClarityLevel(rawValue: d.string(forKey: PrefKey.clarity) ?? "") ?? .off
         mouthNoiseLevel = MouthNoiseLevel(rawValue: d.string(forKey: PrefKey.mouthNoise) ?? "") ?? .off
+        voiceGateLevel = VoiceGateLevel(rawValue: d.string(forKey: PrefKey.voiceGate) ?? "") ?? .off
         inputVolumeValue = d.object(forKey: PrefKey.inputVolume) != nil
             ? SmartLevelController.clampInputVolume(d.float(forKey: PrefKey.inputVolume))
             : SmartLevelController.defaultInputVolume

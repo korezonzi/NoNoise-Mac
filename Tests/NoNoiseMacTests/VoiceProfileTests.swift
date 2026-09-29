@@ -20,7 +20,8 @@ final class VoiceProfileTests: XCTestCase {
             inputVolumeValue: 0.65,
             smartLevelEnabled: true,
             loudnessNormEnabled: true,
-            loudnessTargetLUFS: -16
+            loudnessTargetLUFS: -16,
+            voiceGateLevel: .medium
         )
         let data = try VoiceProfile.encoder.encode(profile)
         let decoded = try VoiceProfile.decoder.decode(VoiceProfile.self, from: data)
@@ -37,6 +38,7 @@ final class VoiceProfileTests: XCTestCase {
         XCTAssertEqual(decoded.smartLevelEnabled, profile.smartLevelEnabled)
         XCTAssertEqual(decoded.loudnessNormEnabled, profile.loudnessNormEnabled)
         XCTAssertEqual(decoded.loudnessTargetLufs ?? 0, profile.loudnessTargetLufs ?? 0, accuracy: 1e-6)
+        XCTAssertEqual(decoded.voiceGateLevel, profile.voiceGateLevel)
         XCTAssertEqual(decoded.version, 1)
     }
 
@@ -105,6 +107,7 @@ final class VoiceProfileTests: XCTestCase {
         XCTAssertNil(decoded.smartLevelEnabled)
         XCTAssertNil(decoded.loudnessNormEnabled)
         XCTAssertNil(decoded.loudnessTargetLufs)
+        XCTAssertNil(decoded.voiceGateLevel)
         XCTAssertEqual(decoded.version, 1)
     }
 
@@ -285,7 +288,8 @@ final class VoiceProfileTests: XCTestCase {
             inputVolumeValue: 0.5,
             smartLevelEnabled: false,
             loudnessNormEnabled: true,
-            loudnessTargetLUFS: -14
+            loudnessTargetLUFS: -14,
+            voiceGateLevel: .medium
         )
         var store = VoiceProfileStore()
         store.save(profile)
@@ -302,6 +306,7 @@ final class VoiceProfileTests: XCTestCase {
         XCTAssertEqual(r.smartLevelEnabled, profile.smartLevelEnabled)
         XCTAssertEqual(r.loudnessNormEnabled, profile.loudnessNormEnabled)
         XCTAssertEqual(r.loudnessTargetLufs ?? 0, profile.loudnessTargetLufs ?? 0, accuracy: 1e-6)
+        XCTAssertEqual(r.voiceGateLevel, profile.voiceGateLevel)
         XCTAssertEqual(r.smartLevelEnabled, profile.smartLevelEnabled)
         XCTAssertEqual(r.preset, profile.preset)
     }

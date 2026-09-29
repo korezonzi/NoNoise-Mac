@@ -211,6 +211,22 @@ struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("周囲の声を抑える").font(.subheadline)
+                Picker("", selection: $audioModel.voiceGateLevel) {
+                    ForEach(VoiceGateLevel.allCases) { level in
+                        Text(level.label).tag(level)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                Text("自分が話していない間、周囲の話し声を絞ります。ヘッドセットなど口元のマイク向けです。声の出だしが欠けると感じたら Low にしてください。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .nnCard()
     }

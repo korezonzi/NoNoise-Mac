@@ -101,7 +101,8 @@ public final class AudioFileDenoiser {
             throw DenoiseError.modelNotReady
         }
 
-        let chainSettings = Self.voiceChainSettings(for: options.preset)
+        var chainSettings = Self.voiceChainSettings(for: options.preset)
+        chainSettings.voiceGateLevel = options.voiceGateLevel
         let voiceChain = VoiceChain()
         voiceChain.configure(chainSettings)
 

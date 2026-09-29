@@ -111,6 +111,41 @@ final class CLIArgumentsTests: XCTestCase {
         ]))
     }
 
+    // MARK: - --voice-gate
+
+    func testParsesVoiceGateLevel() throws {
+        let mode = try CLIArguments.parse([
+            "NoNoiseMacCLI",
+            "--denoise", "/tmp/noisy.wav",
+            "--output", "/tmp/clean.wav",
+            "--voice-gate", "medium"
+        ])
+        if case .denoise(let options) = mode {
+            XCTAssertEqual(options.voiceGateLevel, .medium)
+        } else {
+            XCTFail("expected denoise mode")
+        }
+    }
+
+    func testVoiceGateLevelDefaultsToOffWhenOmitted() throws {
+        let mode = try CLIArguments.parse([
+            "NoNoiseMacCLI", "--denoise", "/tmp/noisy.wav", "--output", "/tmp/clean.wav"
+        ])
+        if case .denoise(let options) = mode {
+            XCTAssertEqual(options.voiceGateLevel, .off)
+        } else {
+            XCTFail("expected denoise mode")
+        }
+    }
+
+    func testUnknownVoiceGateLevelFails() {
+        XCTAssertThrowsError(try CLIArguments.parse([
+            "NoNoiseMacCLI", "--denoise", "/tmp/noisy.wav", "--output", "/tmp/clean.wav", "--voice-gate", "loud"
+        ])) { error in
+            XCTAssertEqual(error as? CLIArguments.ParseError, .invalidVoiceGateLevel("loud"))
+        }
+    }
+
     // MARK: - --aec-spike
 
     func testParsesAECSpikeModeWithDefaults() throws {

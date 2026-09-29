@@ -75,6 +75,13 @@ docs, and reviews.
     background; `gain < 1` only for a SHORT event (`peak > clickRatio·slowEnv`). A longer event
     latches off as voiced content, so onsets and the voiced body pass. Identity otherwise.
   - Controlled by `MouthNoiseLevel` (off/low/medium/high); persisted under `mv.mouthNoise`.
+- **Voice Gate** (`VoiceGate`) — an adaptive-threshold downward expander for headset-mic use,
+  placed after de-click and before the compressor. A slow peak-follower learns the wearer's own
+  speaking level; the open threshold tracks it (`max(absoluteFloor, speakerPeak − margin)`), with
+  hysteresis and a hold timer bridging pauses inside the wearer's own speech. Attenuation-only
+  (never pulls in the limiter); does NOT remove another talker's voice while the wearer is also
+  speaking. Controlled by `VoiceGateLevel` (off/low/medium/high); persisted under `mv.voiceGate`;
+  CLI `--voice-gate`.
 - **Biquad** — RBJ-cookbook second-order IIR filter (TDF-II).
 - **Compressor** — log-domain feed-forward dynamics (threshold/ratio/attack/release/makeup).
 - **Limiter** — fast peak limiter + hard clamp; the final overflow guard (ceiling dB).

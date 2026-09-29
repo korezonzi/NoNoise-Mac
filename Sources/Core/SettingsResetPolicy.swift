@@ -8,6 +8,7 @@ public enum SettingsResetPolicy {
     public static let voicePolishKey = "mv.voicePolish"
     public static let clarityKey = "mv.clarity"
     public static let mouthNoiseKey = "mv.mouthNoise"
+    public static let voiceGateKey = "mv.voiceGate"
     public static let inputVolumeKey = "mv.inputVolume"
     public static let smartLevelKey = "mv.smartLevel"
     public static let incomingEnabledKey = "mv.incomingEnabled"
@@ -26,6 +27,7 @@ public enum SettingsResetPolicy {
         voicePolishKey,
         clarityKey,
         mouthNoiseKey,
+        voiceGateKey,
         inputVolumeKey,
         smartLevelKey,
         incomingEnabledKey,

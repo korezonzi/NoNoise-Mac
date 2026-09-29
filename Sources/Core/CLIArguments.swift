@@ -8,6 +8,7 @@ public struct AudioDenoiseOptions: Equatable {
     public let strength: Float
     public let attenuationDb: Float
     public let shouldOverwrite: Bool
+    public let voiceGateLevel: VoiceGateLevel
 
     public init(inputPath: String,
                 outputPath: String,
@@ -15,7 +16,8 @@ public struct AudioDenoiseOptions: Equatable {
                 gain: Float = 1.0,
                 strength: Float = 1.0,
                 attenuationDb: Float = VoicePreset.maxAttenuationDb,
-                shouldOverwrite: Bool = false) {
+                shouldOverwrite: Bool = false,
+                voiceGateLevel: VoiceGateLevel = .off) {
         self.inputPath = inputPath
         self.outputPath = outputPath
         self.preset = preset
@@ -23,6 +25,7 @@ public struct AudioDenoiseOptions: Equatable {
         self.strength = strength
         self.attenuationDb = attenuationDb
         self.shouldOverwrite = shouldOverwrite
+        self.voiceGateLevel = voiceGateLevel
     }
 }
 
@@ -86,6 +89,7 @@ public enum CLIArguments {
         case unknownOption(String)
         case invalidFloat(String, String)
         case invalidPreset(String)
+        case invalidVoiceGateLevel(String)
         case invalidSpikeScenario(String)
         case mixedModes
         case missingLiveDevice
@@ -96,6 +100,9 @@ public enum CLIArguments {
             case .unknownOption(let option): return "Unknown option \(option)."
             case .invalidFloat(let flag, let value): return "Invalid numeric value for \(flag): \(value)."
             case .invalidPreset(let value): return "Unknown preset \(value)."
+            case .invalidVoiceGateLevel(let value):
+                let known = VoiceGateLevel.allCases.map { $0.rawValue }.joined(separator: ", ")
+                return "Unknown --voice-gate level \(value). Expected one of: \(known)."
             case .invalidSpikeScenario(let value):
                 let known = AECSpikeOptions.validScenarios.sorted().joined(separator: ", ")
                 return "Unknown --aec-spike scenario \(value). Expected one of: \(known)."
@@ -117,6 +124,7 @@ public enum CLIArguments {
         var strengthOverride: Float?
         var attenuationDbOverride: Float?
         var shouldOverwrite = false
+        var voiceGateLevel: VoiceGateLevel = .off
         var spikeScenario: String?
         var spikeOutputDir = "."
         var spikeDurationSec: Double = 10
@@ -156,6 +164,12 @@ public enum CLIArguments {
                 attenuationDbOverride = try floatValue(after: arg, in: arguments, index: &index)
             case "--overwrite":
                 shouldOverwrite = true
+            case "--voice-gate":
+                let rawGate = try value(after: arg, in: arguments, index: &index)
+                guard let gate = VoiceGateLevel(rawValue: rawGate.lowercased()) else {
+                    throw ParseError.invalidVoiceGateLevel(rawGate)
+                }
+                voiceGateLevel = gate
             case "--aec-spike":
                 let rawScenario = try value(after: arg, in: arguments, index: &index)
                 guard let scenario = AECSpikeScenario(rawValue: rawScenario.lowercased()) else {
@@ -209,7 +223,8 @@ public enum CLIArguments {
                 gain: denoiseGainOverride ?? presetDefaults.outputGain,
                 strength: strengthOverride ?? presetDefaults.suppressionStrength,
                 attenuationDb: attenuationDbOverride ?? presetDefaults.attenuationLimitDb,
-                shouldOverwrite: shouldOverwrite
+                shouldOverwrite: shouldOverwrite,
+                voiceGateLevel: voiceGateLevel
             ))
         }
         if let spikeScenario {

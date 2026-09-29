@@ -38,6 +38,7 @@ public struct VoiceProfile: Codable, Identifiable, Equatable, Sendable {
     public var smartLevelEnabled: Bool? = nil
     public var loudnessNormEnabled: Bool? = nil
     public var loudnessTargetLufs: Float? = nil
+    public var voiceGateLevel: VoiceGateLevel? = nil
 
     // MARK: - Memberwise init (used by tests and AudioModel)
 
@@ -54,7 +55,8 @@ public struct VoiceProfile: Codable, Identifiable, Equatable, Sendable {
         inputVolumeValue: Float? = nil,
         smartLevelEnabled: Bool? = nil,
         loudnessNormEnabled: Bool? = nil,
-        loudnessTargetLUFS: Float? = nil
+        loudnessTargetLUFS: Float? = nil,
+        voiceGateLevel: VoiceGateLevel? = nil
     ) {
         self.id = id
         self.name = name
@@ -69,6 +71,7 @@ public struct VoiceProfile: Codable, Identifiable, Equatable, Sendable {
         self.smartLevelEnabled = smartLevelEnabled
         self.loudnessNormEnabled = loudnessNormEnabled
         self.loudnessTargetLufs = loudnessTargetLUFS
+        self.voiceGateLevel = voiceGateLevel
     }
 
     // MARK: - Factory

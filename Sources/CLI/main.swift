@@ -18,8 +18,9 @@ case .help:
     Usage:
       NoNoiseMacCLI --in <device> --out <device> [--gain <float>]
       NoNoiseMacCLI --action <verb>
-      NoNoiseMacCLI --denoise <input-audio-file> --output <output-audio-file> [--preset auto|strong|medium|weak|custom] [--gain <float>] [--strength <0...1>] [--attenuation-db <float>] [--overwrite]
+      NoNoiseMacCLI --denoise <input-audio-file> --output <output-audio-file> [--preset auto|strong|medium|weak|custom] [--gain <float>] [--strength <0...1>] [--attenuation-db <float>] [--voice-gate off|low|medium|high] [--overwrite]
       (legacy preset names meeting|podcast|tutorial are still accepted as aliases)
+      (--voice-gate, like --preset/--strength/--attenuation-db, applies only to --denoise mode)
       NoNoiseMacCLI --aec-spike all|self|cross|format|pin|agc|tap|perf [--spike-out <dir>] [--spike-duration <sec>] [--spike-input <uid-or-name>]
       (dev-only diagnostic mode: feasibility harness for Apple Voice Processing I/O — writes WAVs + spike-results.json to --spike-out)
       (--aec-spike exit codes: 0 = all scenarios completed, 2 = one or more scenarios errored, 1 = the harness itself failed to start)
